@@ -25,7 +25,10 @@ import {
   Download,
   Cloud,
   CloudOff,
-  AlertCircle
+  AlertCircle,
+  Landmark,
+  CheckCircle,
+  PiggyBank
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
@@ -34,7 +37,7 @@ import { supabase } from '@/lib/supabase';
 
 // Types
 type CostCenter = 'Compartilhado' | 'Individual' | 'Lunna 50%' | 'Lunna 30%';
-type Category = 'Fixa' | 'Lunna';
+type Category = 'Almoço' | 'Bebida' | 'Casa do Lago' | 'Combustível' | 'Esporte' | 'Farmacia' | 'Fixa' | 'Ifood' | 'Lunna' | 'Manutenção Carro' | 'Manutenção Casa' | 'Mercado' | 'Outros' | 'Saúde' | 'Velli' | 'Viagem';
 type Card = 'Nubank' | 'Neon' | 'Bradesco' | 'C6Bank' | 'Pix';
 type Person = 'Mccley' | 'Paula' | 'Tarcilla' | 'Jan' | 'Saulo' | 'Jorge' | 'Edielton';
 
@@ -58,18 +61,40 @@ interface MonthlyRevenue {
   id: string;
   month: number;
   year: number;
-  value: number;
+  value?: number;
+  salary?: number;
+  commission?: number;
+  dsr?: number;
+  grossSalary?: number;
+  netSalary?: number;
+}
+
+interface Loan {
+  id: string;
+  person: string;
+  totalValue: number;
+  installmentsTotal: number;
+  installmentsPaid: number;
+  monthlyValue: number;
+  description: string;
+  date: string;
+  amountPaid?: number;
+  paymentHistory?: { date: string, amount: number }[];
 }
 
 const PEOPLE: Person[] = ['Mccley', 'Paula', 'Tarcilla', 'Jan', 'Saulo', 'Jorge', 'Edielton'];
 const COST_CENTERS: CostCenter[] = ['Compartilhado', 'Individual', 'Lunna 50%', 'Lunna 30%'];
-const CATEGORIES: Category[] = ['Fixa', 'Lunna'];
+const CATEGORIES: Category[] = ['Almoço', 'Bebida', 'Casa do Lago', 'Combustível', 'Esporte', 'Farmacia', 'Fixa', 'Ifood', 'Lunna', 'Manutenção Carro', 'Manutenção Casa', 'Mercado', 'Outros', 'Saúde', 'Velli', 'Viagem'];
 const CARDS: Card[] = ['Nubank', 'Neon', 'Bradesco', 'C6Bank', 'Pix'];
 
 export default function McFinanceApp() {
-  const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita'>('ledger');
+  const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita' | 'emprestimos'>('ledger');
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [revenues, setRevenues] = useState<MonthlyRevenue[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [editingInstallment, setEditingInstallment] = useState<Record<string, number>>({});
+  const [editingTotal, setEditingTotal] = useState<Record<string, number>>({});
+  const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
   const [showForm, setShowForm] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'local' | 'error'>('local');
   const isInitialLoad = useRef(true);
@@ -87,6 +112,7 @@ export default function McFinanceApp() {
         setIsSyncing(true);
         const { data: expData, error: expError } = await supabase.from('expenses').select('*');
         const { data: revData, error: revError } = await supabase.from('revenues').select('*');
+        const { data: loanData, error: loanError } = await supabase.from('loans').select('*').catch(() => ({ data: null, error: null })); // Fallback if table doesn't exist
 
         if (expError || revError) throw expError || revError;
 
@@ -111,6 +137,10 @@ export default function McFinanceApp() {
 
         if (revData) {
           setRevenues(revData);
+        }
+
+        if (loanData) {
+          setLoans(loanData);
         }
 
         setSyncStatus('synced');
@@ -182,6 +212,23 @@ export default function McFinanceApp() {
     return () => clearTimeout(timeout);
   }, [revenues, syncStatus]);
 
+  // Sync loans to Supabase
+  useEffect(() => {
+    if (isInitialLoad.current || syncStatus === 'local') return;
+
+    const syncLoans = async () => {
+      try {
+        const { error } = await supabase.from('loans').upsert(loans).catch(() => ({ error: null })); // Fallback if table missing
+        if (error) throw error;
+      } catch (error) {
+        console.error('Supabase sync error (loans):', error);
+      }
+    };
+
+    const timeout = setTimeout(syncLoans, 1000);
+    return () => clearTimeout(timeout);
+  }, [loans, syncStatus]);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
@@ -209,6 +256,49 @@ export default function McFinanceApp() {
   };
 
   const [formData, setFormData] = useState<Partial<Expense>>(initialFormState);
+
+  // Revenue Form State
+  const [revenueFormData, setRevenueFormData] = useState({
+    month: new Date().getMonth(),
+    year: Math.max(2025, new Date().getFullYear()),
+    salary: 0,
+    commission: 0,
+    dsr: 0,
+    netSalary: 0
+  });
+
+  const getRevenueAverages = () => {
+    if (revenues.length === 0) return { salary: 0, commission: 0, dsr: 0, grossSalary: 0 };
+    const sorted = [...revenues].sort((a, b) => (b.year - a.year) || (b.month - a.month)).slice(0, 12);
+    let sumSal = 0, sumCom = 0, sumDsr = 0, sumGross = 0;
+    sorted.forEach(r => {
+      sumSal += r.salary || 0;
+      sumCom += r.commission || 0;
+      sumDsr += r.dsr || 0;
+      sumGross += r.grossSalary || (r.value || 0);
+    });
+    const count = sorted.length;
+    return {
+      salary: sumSal / count,
+      commission: sumCom / count,
+      dsr: sumDsr / count,
+      grossSalary: sumGross / count
+    };
+  };
+  const revenueAverages = getRevenueAverages();
+
+  // Loan Form State
+  const initialLoanFormState: Partial<Loan> = {
+    person: '',
+    totalValue: 0,
+    installmentsTotal: 1,
+    installmentsPaid: 0,
+    monthlyValue: 0,
+    description: '',
+    date: new Date().toISOString().split('T')[0]
+  };
+  const [loanFormData, setLoanFormData] = useState<Partial<Loan>>(initialLoanFormState);
+
 
   // Calculations
   const totals = useMemo(() => {
@@ -331,6 +421,30 @@ export default function McFinanceApp() {
 
     const reportTotal = filteredExpenses.reduce((acc, curr) => acc + curr.value, 0);
 
+    const mccleyReportTotal = filteredExpenses.reduce((acc, exp) => {
+      let mccleyShare = 0;
+      if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+        const includesMccley = exp.splitWith.includes('Mccley');
+        const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
+        mccleyShare = exp.value / divisor;
+      } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
+        mccleyShare = exp.value;
+      } else if (exp.costCenter === 'Lunna 50%') {
+        mccleyShare = exp.value * 0.5;
+      } else if (exp.costCenter === 'Lunna 30%') {
+        mccleyShare = exp.value * 0.7;
+      }
+      return acc + mccleyShare;
+    }, 0);
+
+    const reportRevenue = revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.netSalary || 
+                          revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.value || 0;
+
+    const reportByCategory = filteredExpenses.reduce((acc, exp) => {
+      acc[exp.category] = (acc[exp.category] || 0) + exp.value;
+      return acc;
+    }, {} as Record<string, number>);
+
     return {
       mccleyTotalExpenses,
       currentMonthMccleyExpenses,
@@ -342,7 +456,10 @@ export default function McFinanceApp() {
       currentMonthRevenue,
       futureExpensesData,
       filteredExpenses,
-      reportTotal
+      reportTotal,
+      mccleyReportTotal,
+      reportRevenue,
+      reportByCategory
     };
   }, [expenses, reportFilters, revenues]);
 
@@ -379,7 +496,21 @@ export default function McFinanceApp() {
     doc.setFontSize(12);
     doc.setTextColor(0);
     doc.text(`Total Filtrado: R$ ${totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 40);
-    doc.text(`Quantidade de Lançamentos: ${totals.filteredExpenses.length}`, 14, 46);
+    doc.text(`Despesas Mccley: R$ ${totals.mccleyReportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 46);
+    doc.text(`Receita Líquida: R$ ${totals.reportRevenue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 52);
+    
+    const balance = totals.reportRevenue - totals.mccleyReportTotal;
+    doc.setFontSize(14);
+    if (balance >= 0) {
+      doc.setTextColor(16, 185, 129); // Green
+    } else {
+      doc.setTextColor(239, 68, 68); // Red
+    }
+    doc.text(`Saldo do Mês (Mccley): R$ ${balance.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 60);
+
+    doc.setTextColor(0);
+    doc.setFontSize(10);
+    doc.text(`Quantidade de Lançamentos: ${totals.filteredExpenses.length}`, 14, 68);
 
     // Table
     const tableColumn = ['Descrição', 'Vencimento', 'Centro de Custo', 'Valor (R$)', 'Categoria', 'Cartão'];
@@ -395,11 +526,11 @@ export default function McFinanceApp() {
     autoTable(doc, {
       head: [tableColumn],
       body: tableRows,
-      startY: 55,
+      startY: 75,
       theme: 'grid',
       headStyles: { fillColor: [16, 185, 129], textColor: [0, 0, 0], fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [245, 245, 245] },
-      margin: { top: 55 },
+      margin: { top: 75 },
     });
 
     doc.save(`relatorio_financeiro_${new Date().toISOString().split('T')[0]}.pdf`);
@@ -469,7 +600,11 @@ export default function McFinanceApp() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] text-white font-sans pb-24">
+    <div className="min-h-screen bg-[#121212] text-white font-sans pb-24 relative overflow-hidden">
+      {/* Background Glow Effects */}
+      <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-[#10B981]/10 rounded-full blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-0 right-1/4 w-[500px] h-[500px] bg-blue-900/10 rounded-full blur-[120px] pointer-events-none" />
+
       {/* Header */}
       <header className="px-6 py-6 flex justify-between items-center">
         <div className="flex flex-col gap-1">
@@ -732,13 +867,22 @@ export default function McFinanceApp() {
               {/* Category Card */}
               <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
                 <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Categoria</p>
-                <select 
-                  className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none appearance-none"
-                  value={formData.category}
-                  onChange={(e) => setFormData({ ...formData, category: e.target.value as Category })}
-                >
-                  {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
+                <div className="flex flex-wrap gap-2">
+                  {CATEGORIES.map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setFormData({ ...formData, category: c })}
+                      className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${
+                        formData.category === c 
+                          ? 'bg-[#064E3B] text-[#10B981] border-[#10B981]' 
+                          : 'bg-[#262626] text-gray-400 border-transparent hover:bg-[#333333]'
+                      }`}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Debtor Card (Conditional) */}
@@ -842,7 +986,7 @@ export default function McFinanceApp() {
 
             {/* Filters */}
             <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-6">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Mês</p>
                   <select 
@@ -852,6 +996,18 @@ export default function McFinanceApp() {
                   >
                     {['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'].map((m, i) => (
                       <option key={m} value={i}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Ano</p>
+                  <select 
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    value={reportFilters.year}
+                    onChange={(e) => setReportFilters({ ...reportFilters, year: parseInt(e.target.value) })}
+                  >
+                    {[2024, 2025, 2026, 2027, 2028, 2029, 2030].map(y => (
+                      <option key={y} value={y}>{y}</option>
                     ))}
                   </select>
                 </div>
@@ -866,9 +1022,6 @@ export default function McFinanceApp() {
                     {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Centro de Custo</p>
                   <select 
@@ -894,24 +1047,66 @@ export default function McFinanceApp() {
               </div>
             </div>
 
-            {/* Report Summary */}
-            <div className="bg-gradient-to-br from-[#10B981] to-[#059669] p-8 rounded-3xl text-black shadow-lg shadow-emerald-900/20 relative overflow-hidden">
-              <div className="relative z-10">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-2">Total Filtrado</p>
-                <h3 className="text-4xl font-bold">
-                  R$ {totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                </h3>
-                <div className="mt-4 pt-4 border-t border-black/10 flex justify-between items-center">
-                  <p className="text-xs font-bold uppercase tracking-widest opacity-70">Lançamentos: {totals.filteredExpenses.length}</p>
-                  <button 
-                    onClick={exportToPDF}
-                    className="flex items-center gap-2 bg-black text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-gray-900 transition-colors"
-                  >
-                    <Download className="w-4 h-4" /> Exportar PDF
-                  </button>
+            {/* Dashboard Visual */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Balance Summary Card */}
+              <div className={`p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${totals.reportRevenue - totals.mccleyReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20'}`}>
+                <div className="relative z-10">
+                  <div className="flex justify-between items-start mb-6">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-1">Mccley - Saldo do Mês</p>
+                      <h3 className="text-4xl font-bold">
+                        R$ {(totals.reportRevenue - totals.mccleyReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                      </h3>
+                    </div>
+                    <button 
+                      onClick={exportToPDF}
+                      className="flex items-center gap-2 bg-black/20 hover:bg-black/40 text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors backdrop-blur-sm"
+                    >
+                      <Download className="w-4 h-4" /> PDF
+                    </button>
+                  </div>
+                  
+                  <div className="space-y-3 pt-4 border-t border-white/20">
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="font-bold opacity-80">Receita Líquida:</span>
+                      <span className="font-bold">+ R$ {totals.reportRevenue.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="font-bold opacity-80">Despesas (Sua parte):</span>
+                      <span className="font-bold">- R$ {totals.mccleyReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                    </div>
+                  </div>
+                </div>
+                <BarChart3 className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 -rotate-12" />
+              </div>
+
+              {/* Categories Chart */}
+              <div className="bg-[#171717]/80 backdrop-blur-xl p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-xl">
+                <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500 mb-2">Top 5 Categorias</p>
+                <div className="space-y-4">
+                  {Object.entries(totals.reportByCategory)
+                    .sort(([,a], [,b]) => b - a)
+                    .slice(0, 5)
+                    .map(([category, value]) => {
+                      const percentage = totals.reportTotal > 0 ? (value / totals.reportTotal) * 100 : 0;
+                      return (
+                        <div key={category} className="space-y-1.5">
+                          <div className="flex justify-between text-xs font-bold text-gray-300">
+                            <span>{category}</span>
+                            <span>R$ {value.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                          </div>
+                          <div className="w-full bg-[#262626] rounded-full h-2">
+                            <div className="bg-[#10B981] h-2 rounded-full transition-all" style={{ width: `${percentage}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  {Object.keys(totals.reportByCategory).length === 0 && (
+                    <p className="text-gray-600 text-sm italic">Nenhum gasto no período.</p>
+                  )}
                 </div>
               </div>
-              <BarChart3 className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 -rotate-12" />
             </div>
 
             {/* Detailing List */}
@@ -966,30 +1161,39 @@ export default function McFinanceApp() {
           <div className="space-y-8">
             <div className="space-y-2">
               <h2 className="text-4xl font-bold">Lançar Receita</h2>
-              <p className="text-gray-500 text-sm">Gerencie sua receita mensal.</p>
+              <p className="text-gray-500 text-sm">Gerencie sua receita mensal e acompanhe as métricas.</p>
             </div>
 
-            <div className="bg-[#171717] p-8 rounded-3xl border border-white/5 space-y-6">
-              <div className="space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#10B981]">Valor da Receita Mensal</p>
-                <div className="flex items-baseline gap-4">
-                  <span className="text-3xl font-bold text-gray-600">R$</span>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    placeholder="0,00"
-                    className="bg-transparent text-6xl font-bold outline-none w-full placeholder:text-gray-800"
-                    id="revenueInput"
-                  />
+            {/* Dashboard Média dos últimos 12 meses */}
+            <div className="bg-[#171717]/80 backdrop-blur-xl p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-2xl">
+              <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Média dos últimos 12 meses</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
+                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Salário</p>
+                  <p className="font-bold text-lg text-white">R$ {revenueAverages.salary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                </div>
+                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
+                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Comissão</p>
+                  <p className="font-bold text-lg text-white">R$ {revenueAverages.commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                </div>
+                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
+                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">DSR</p>
+                  <p className="font-bold text-lg text-white">R$ {revenueAverages.dsr.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                </div>
+                <div className="bg-emerald-900/10 p-4 rounded-2xl border border-emerald-500/20 shadow-inner">
+                  <p className="text-xs text-emerald-500 uppercase tracking-wider font-bold mb-1">Salário Bruto</p>
+                  <p className="font-bold text-lg text-[#10B981]">R$ {revenueAverages.grossSalary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                 </div>
               </div>
+            </div>
 
+            <div className="bg-[#171717] p-8 rounded-[2rem] border border-white/5 space-y-6">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Mês</p>
                   <select 
-                    id="revenueMonth" 
-                    defaultValue={new Date().getMonth()}
+                    value={revenueFormData.month}
+                    onChange={(e) => setRevenueFormData({ ...revenueFormData, month: parseInt(e.target.value) })}
                     className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none appearance-none"
                   >
                     {['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'].map((m, i) => (
@@ -1000,37 +1204,118 @@ export default function McFinanceApp() {
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Ano</p>
                   <select 
-                    id="revenueYear" 
-                    defaultValue={new Date().getFullYear()}
+                    value={revenueFormData.year}
+                    onChange={(e) => setRevenueFormData({ ...revenueFormData, year: parseInt(e.target.value) })}
                     className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none appearance-none"
                   >
-                    {[2024, 2025, 2026, 2027].map(y => (
+                    {[2025, 2026, 2027, 2028, 2029, 2030].map(y => (
                       <option key={y} value={y}>{y}</option>
                     ))}
                   </select>
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-white/5">
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-400">Salário</p>
+                  <div className="flex items-center gap-2 bg-[#262626] rounded-xl p-4 focus-within:border-white/20 border border-transparent transition-colors">
+                    <span className="text-gray-500 font-bold">R$</span>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="0,00"
+                      value={revenueFormData.salary || ''}
+                      onChange={e => setRevenueFormData({...revenueFormData, salary: parseFloat(e.target.value) || 0})}
+                      className="bg-transparent text-white outline-none w-full"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-400">Comissão</p>
+                  <div className="flex items-center gap-2 bg-[#262626] rounded-xl p-4 focus-within:border-white/20 border border-transparent transition-colors">
+                    <span className="text-gray-500 font-bold">R$</span>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="0,00"
+                      value={revenueFormData.commission || ''}
+                      onChange={e => setRevenueFormData({...revenueFormData, commission: parseFloat(e.target.value) || 0})}
+                      className="bg-transparent text-white outline-none w-full"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-400">DSR</p>
+                  <div className="flex items-center gap-2 bg-[#262626] rounded-xl p-4 focus-within:border-white/20 border border-transparent transition-colors">
+                    <span className="text-gray-500 font-bold">R$</span>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="0,00"
+                      value={revenueFormData.dsr || ''}
+                      onChange={e => setRevenueFormData({...revenueFormData, dsr: parseFloat(e.target.value) || 0})}
+                      className="bg-transparent text-white outline-none w-full"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#10B981]">Salário Líquido</p>
+                  <div className="flex items-center gap-2 bg-[#064E3B]/20 rounded-xl p-4 border border-[#10B981]/20 focus-within:border-[#10B981] transition-colors">
+                    <span className="text-[#10B981] font-bold">R$</span>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="0,00"
+                      value={revenueFormData.netSalary || ''}
+                      onChange={e => setRevenueFormData({...revenueFormData, netSalary: parseFloat(e.target.value) || 0})}
+                      className="bg-transparent text-[#10B981] font-bold outline-none w-full"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-[#262626]/50 p-5 rounded-2xl flex justify-between items-center border border-white/5 border-dashed">
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Salário Bruto Projetado</p>
+                <p className="text-xl font-bold text-white">
+                  R$ {(revenueFormData.salary + revenueFormData.commission + revenueFormData.dsr).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+
               <button 
                 onClick={() => {
-                  const val = parseFloat((document.getElementById('revenueInput') as HTMLInputElement).value);
-                  const month = parseInt((document.getElementById('revenueMonth') as HTMLSelectElement).value);
-                  const year = parseInt((document.getElementById('revenueYear') as HTMLSelectElement).value);
-                  if (!isNaN(val)) {
-                    const existingIdx = revenues.findIndex(r => r.month === month && r.year === year);
-                    if (existingIdx >= 0) {
-                      const newRevenues = [...revenues];
-                      newRevenues[existingIdx].value = val;
-                      setRevenues(newRevenues);
-                    } else {
-                      setRevenues([...revenues, { id: Math.random().toString(36).substr(2, 9), month, year, value: val }]);
-                    }
-                    (document.getElementById('revenueInput') as HTMLInputElement).value = '';
+                  const grossSalary = revenueFormData.salary + revenueFormData.commission + revenueFormData.dsr;
+                  const newRevenue: MonthlyRevenue = {
+                    id: Math.random().toString(36).substr(2, 9),
+                    month: revenueFormData.month,
+                    year: revenueFormData.year,
+                    salary: revenueFormData.salary,
+                    commission: revenueFormData.commission,
+                    dsr: revenueFormData.dsr,
+                    grossSalary,
+                    netSalary: revenueFormData.netSalary,
+                    value: revenueFormData.netSalary // Mantém o value com o líquido para compatibilidade antiga
+                  };
+                  
+                  const existingIdx = revenues.findIndex(r => r.month === newRevenue.month && r.year === newRevenue.year);
+                  if (existingIdx >= 0) {
+                    const newRevenues = [...revenues];
+                    newRevenues[existingIdx] = { ...newRevenues[existingIdx], ...newRevenue };
+                    setRevenues(newRevenues);
+                  } else {
+                    setRevenues([...revenues, newRevenue]);
                   }
+                  
+                  setRevenueFormData({
+                    ...revenueFormData,
+                    salary: 0,
+                    commission: 0,
+                    dsr: 0,
+                    netSalary: 0
+                  });
                 }}
                 className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] text-black py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20 active:scale-95 transition-transform"
               >
-                Salvar Receita <ArrowRight className="w-5 h-5" />
+                Salvar Lançamento <ArrowRight className="w-5 h-5" />
               </button>
             </div>
 
@@ -1038,21 +1323,309 @@ export default function McFinanceApp() {
               <h3 className="text-xl font-bold px-2">Histórico de Receitas</h3>
               <div className="space-y-4">
                 {revenues.sort((a, b) => b.year - a.year || b.month - a.month).map(r => (
-                  <div key={r.id} className="bg-[#171717] p-6 rounded-2xl border border-white/5 flex justify-between items-center">
-                    <div>
-                      <p className="font-bold">{['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'][r.month]} {r.year}</p>
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <p className="font-bold text-lg text-[#10B981]">R$ {r.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-                      <button onClick={() => setRevenues(revenues.filter(rev => rev.id !== r.id))} className="text-red-500 p-2">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                  <div key={r.id} className="bg-[#171717]/80 backdrop-blur-xl p-6 rounded-2xl border border-white/5 flex flex-col gap-4 shadow-xl">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <p className="font-bold text-lg text-white">{['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'][r.month]} {r.year}</p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-2 mt-3 text-xs text-gray-400">
+                          <span className="bg-[#262626] px-2 py-1 rounded-md text-gray-300">Bruto: R$ {(r.grossSalary || r.value || 0).toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>
+                          {r.salary !== undefined && <span className="px-2 py-1">Salário: R$ {r.salary.toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>}
+                          {r.commission !== undefined && <span className="px-2 py-1">Comissão: R$ {r.commission.toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>}
+                          {r.dsr !== undefined && <span className="px-2 py-1">DSR: R$ {r.dsr.toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <div className="text-right">
+                          <p className="text-[10px] uppercase text-[#10B981] font-bold tracking-widest mb-1">Líquido Recebido</p>
+                          <p className="font-bold text-2xl text-[#10B981]">R$ {(r.netSalary || r.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                        </div>
+                        <button onClick={() => setRevenues(revenues.filter(rev => rev.id !== r.id))} className="text-red-500 p-3 hover:bg-red-500/10 rounded-xl transition-colors self-center">
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
+        ) : activeTab === 'emprestimos' ? (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-8"
+          >
+            <div className="space-y-2">
+              <h2 className="text-4xl font-bold">Empréstimos</h2>
+              <p className="text-gray-500 text-sm">Gerencie valores emprestados e recebimentos parcelados.</p>
+            </div>
+
+            {/* Novo Empréstimo */}
+            <div className="bg-[#171717]/80 backdrop-blur-xl p-8 rounded-[2rem] border border-white/10 shadow-2xl space-y-6 relative z-10">
+              <h3 className="font-bold text-lg flex items-center gap-2">
+                <PiggyBank className="w-5 h-5 text-[#10B981]" />
+                Registrar Novo Empréstimo
+              </h3>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Para quem?</label>
+                  <input 
+                    type="text" 
+                    placeholder="Nome da pessoa"
+                    className="w-full bg-[#262626] border border-white/5 rounded-2xl py-4 px-4 text-white focus:outline-none focus:border-[#10B981]/50 focus:ring-1 focus:ring-[#10B981]/50 transition-all"
+                    value={loanFormData.person}
+                    onChange={e => setLoanFormData({...loanFormData, person: e.target.value})}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Descrição</label>
+                  <input 
+                    type="text" 
+                    placeholder="Ex: Empréstimo carro"
+                    className="w-full bg-[#262626] border border-white/5 rounded-2xl py-4 px-4 text-white focus:outline-none focus:border-[#10B981]/50 focus:ring-1 focus:ring-[#10B981]/50 transition-all"
+                    value={loanFormData.description}
+                    onChange={e => setLoanFormData({...loanFormData, description: e.target.value})}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Valor Total (R$)</label>
+                  <input 
+                    type="number"
+                    step="0.01" 
+                    placeholder="0.00"
+                    className="w-full bg-[#262626] border border-white/5 rounded-2xl py-4 px-4 text-white focus:outline-none focus:border-[#10B981]/50 focus:ring-1 focus:ring-[#10B981]/50 transition-all"
+                    value={loanFormData.totalValue || ''}
+                    onChange={e => {
+                      const total = parseFloat(e.target.value);
+                      const installments = loanFormData.installmentsTotal || 1;
+                      setLoanFormData({
+                        ...loanFormData, 
+                        totalValue: total,
+                        monthlyValue: total / installments
+                      });
+                    }}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Qtd Parcelas</label>
+                  <input 
+                    type="number"
+                    min="1"
+                    className="w-full bg-[#262626] border border-white/5 rounded-2xl py-4 px-4 text-white focus:outline-none focus:border-[#10B981]/50 focus:ring-1 focus:ring-[#10B981]/50 transition-all"
+                    value={loanFormData.installmentsTotal || ''}
+                    onChange={e => {
+                      const installments = parseInt(e.target.value) || 1;
+                      const total = loanFormData.totalValue || 0;
+                      setLoanFormData({
+                        ...loanFormData, 
+                        installmentsTotal: installments,
+                        monthlyValue: total / installments
+                      });
+                    }}
+                  />
+                </div>
+              </div>
+
+              {loanFormData.totalValue && loanFormData.installmentsTotal ? (
+                <div className="p-4 bg-emerald-900/20 rounded-2xl border border-emerald-500/20 flex items-center justify-between">
+                  <span className="text-emerald-500 text-sm font-medium">Valor por Parcela:</span>
+                  <span className="text-xl font-bold text-emerald-400">R$ {(loanFormData.totalValue / loanFormData.installmentsTotal).toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>
+                </div>
+              ) : null}
+
+              <motion.button 
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => {
+                  if (loanFormData.person && loanFormData.totalValue && loanFormData.installmentsTotal) {
+                    const newLoan: Loan = {
+                      id: Math.random().toString(36).substr(2, 9),
+                      person: loanFormData.person,
+                      totalValue: loanFormData.totalValue,
+                      installmentsTotal: loanFormData.installmentsTotal,
+                      installmentsPaid: 0,
+                      monthlyValue: loanFormData.totalValue / loanFormData.installmentsTotal,
+                      description: loanFormData.description || 'Empréstimo',
+                      date: new Date().toISOString().split('T')[0]
+                    };
+                    setLoans([newLoan, ...loans]);
+                    setLoanFormData(initialLoanFormState);
+                  }
+                }}
+                className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] text-white font-bold py-4 rounded-2xl shadow-lg shadow-[#10B981]/25 hover:shadow-[#10B981]/40 transition-all flex items-center justify-center gap-2"
+              >
+                Salvar Empréstimo <ArrowRight className="w-5 h-5" />
+              </motion.button>
+            </div>
+
+            {/* Lista de Empréstimos */}
+            <div className="space-y-4">
+              <h3 className="text-xl font-bold px-2">Empréstimos Ativos</h3>
+              {loans.length === 0 ? (
+                <div className="text-center py-10 text-gray-500">Nenhum empréstimo registrado.</div>
+              ) : (
+                <div className="space-y-4 relative z-10">
+                  {loans.map(loan => {
+                    const amountPaid = loan.amountPaid ?? (loan.installmentsPaid * loan.monthlyValue);
+                    const remainingBalance = Math.max(0, loan.totalValue - amountPaid);
+                    const editingValue = editingInstallment[loan.id] !== undefined ? editingInstallment[loan.id] : loan.monthlyValue;
+                    
+                    return (
+                    <motion.div 
+                      key={loan.id}
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="bg-[#171717]/80 backdrop-blur-xl p-6 rounded-2xl border border-white/10 flex flex-col gap-4 shadow-xl"
+                    >
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <h4 className="font-bold text-lg text-white">{loan.person}</h4>
+                          <p className="text-sm text-gray-400">{loan.description}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-gray-500 uppercase tracking-wider font-bold mb-1">Total Emprestado</p>
+                          <div className="flex items-center justify-end gap-2">
+                            {editingTotal[loan.id] !== undefined ? (
+                              <div className="flex items-center gap-1 bg-[#262626] rounded-lg px-2 py-1 border border-white/5 focus-within:border-red-500/50">
+                                <span className="text-xs font-bold text-red-400">R$</span>
+                                <input 
+                                  type="number" 
+                                  step="0.01"
+                                  autoFocus
+                                  value={editingTotal[loan.id]}
+                                  onChange={e => setEditingTotal({ ...editingTotal, [loan.id]: parseFloat(e.target.value) || 0 })}
+                                  onBlur={() => {
+                                      setLoans(loans.map(l => l.id === loan.id ? { ...l, totalValue: editingTotal[loan.id] } : l));
+                                      const newEditing = { ...editingTotal };
+                                      delete newEditing[loan.id];
+                                      setEditingTotal(newEditing);
+                                  }}
+                                  className="bg-transparent text-sm font-bold text-red-400 outline-none w-20 text-right"
+                                />
+                              </div>
+                            ) : (
+                              <>
+                                <p className="font-bold text-red-400">R$ {loan.totalValue.toLocaleString('pt-BR', {minimumFractionDigits:2})}</p>
+                                <button onClick={() => setEditingTotal({ ...editingTotal, [loan.id]: loan.totalValue })} className="text-gray-500 hover:text-white">
+                                  <Edit2 className="w-3 h-3" />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wider font-bold mt-2 mb-1">Saldo Devedor</p>
+                          <p className="font-bold text-[#10B981]">R$ {remainingBalance.toLocaleString('pt-BR', {minimumFractionDigits:2})}</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-xs text-gray-400 font-bold">
+                          <span>Progresso: {loan.installmentsPaid} de {loan.installmentsTotal} parcelas</span>
+                          <span>R$ {amountPaid.toLocaleString('pt-BR', {minimumFractionDigits:2})} recebidos</span>
+                        </div>
+                        {/* Progress bar */}
+                        <div className="w-full h-2 bg-[#262626] rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-gradient-to-r from-[#10B981] to-emerald-400 transition-all duration-500"
+                            style={{ width: `${Math.min(100, (loan.installmentsPaid / loan.installmentsTotal) * 100)}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between items-center pt-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">Próxima parcela:</span>
+                          <div className="flex items-center gap-1 bg-[#262626] rounded-lg px-2 py-1 border border-white/5 focus-within:border-[#10B981]/50 focus-within:ring-1 focus-within:ring-[#10B981]/50 transition-all">
+                            <span className="text-xs font-bold text-[#10B981]">R$</span>
+                            <input 
+                              type="number" 
+                              step="0.01"
+                              value={editingValue || ''}
+                              onChange={e => setEditingInstallment({ ...editingInstallment, [loan.id]: parseFloat(e.target.value) || 0 })}
+                              className="bg-transparent text-sm font-bold text-[#10B981] outline-none w-20"
+                            />
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          {loan.installmentsPaid < loan.installmentsTotal && remainingBalance > 0 ? (
+                            <button 
+                              onClick={() => {
+                                setLoans(loans.map(l => {
+                                  if (l.id === loan.id) {
+                                    const newPayment = { date: new Date().toISOString(), amount: editingValue };
+                                    return { 
+                                      ...l, 
+                                      installmentsPaid: l.installmentsPaid + 1,
+                                      amountPaid: (l.amountPaid ?? (l.installmentsPaid * l.monthlyValue)) + editingValue,
+                                      paymentHistory: [...(l.paymentHistory || []), newPayment]
+                                    };
+                                  }
+                                  return l;
+                                }));
+                                const newEditing = { ...editingInstallment };
+                                delete newEditing[loan.id];
+                                setEditingInstallment(newEditing);
+                              }}
+                              className="px-4 py-2 bg-emerald-900/20 text-emerald-500 border border-emerald-500/20 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-2 hover:bg-emerald-900/40 transition-colors"
+                            >
+                              <CheckCircle className="w-4 h-4" /> Receber Parcela
+                            </button>
+                          ) : (
+                            <span className="px-4 py-2 bg-gray-800 text-gray-400 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-2">
+                              <CheckCircle className="w-4 h-4" /> Quitado
+                            </span>
+                          )}
+                          <button 
+                            onClick={() => setLoans(loans.filter(l => l.id !== loan.id))}
+                            className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Accordion History */}
+                      <div className="border-t border-white/5 pt-4 mt-2">
+                        <button 
+                          onClick={() => setExpandedHistory({ ...expandedHistory, [loan.id]: !expandedHistory[loan.id] })}
+                          className="flex items-center justify-between w-full text-xs font-bold text-gray-400 hover:text-white uppercase tracking-wider"
+                        >
+                          <span>Histórico de Recebimentos</span>
+                          <ChevronRight className={`w-4 h-4 transition-transform ${expandedHistory[loan.id] ? 'rotate-90' : ''}`} />
+                        </button>
+                        
+                        <AnimatePresence>
+                          {expandedHistory[loan.id] && (
+                            <motion.div 
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: 'auto', opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              className="overflow-hidden"
+                            >
+                              <div className="pt-4 space-y-2">
+                                {!loan.paymentHistory || loan.paymentHistory.length === 0 ? (
+                                  <p className="text-xs text-gray-500 text-center py-2">Nenhum pagamento registrado.</p>
+                                ) : (
+                                  loan.paymentHistory.map((payment, idx) => (
+                                    <div key={idx} className="flex justify-between items-center bg-[#262626]/50 p-2 rounded-lg text-sm">
+                                      <span className="text-gray-400">{new Date(payment.date).toLocaleDateString('pt-BR')}</span>
+                                      <span className="font-bold text-[#10B981]">R$ {payment.amount.toLocaleString('pt-BR', {minimumFractionDigits:2})}</span>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    </motion.div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </motion.div>
         ) : (
           <div className="flex flex-col items-center justify-center py-20 text-gray-500">
             <User className="w-12 h-12 mb-4 opacity-20" />
@@ -1100,14 +1673,21 @@ export default function McFinanceApp() {
           className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'relatorio' ? 'text-[#10B981]' : 'text-gray-600'}`}
         >
           <BarChart3 className="w-6 h-6" />
-          <span className="text-[10px] font-bold uppercase tracking-tighter">Relatório</span>
+          <span className="text-[10px] font-bold uppercase tracking-tighter hidden sm:inline">Relatório</span>
         </button>
         <button 
           onClick={() => setActiveTab('receita')}
           className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'receita' ? 'text-[#10B981]' : 'text-gray-600'}`}
         >
           <TrendingUp className="w-6 h-6" />
-          <span className="text-[10px] font-bold uppercase tracking-tighter">Receita</span>
+          <span className="text-[10px] font-bold uppercase tracking-tighter hidden sm:inline">Receita</span>
+        </button>
+        <button 
+          onClick={() => setActiveTab('emprestimos')}
+          className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'emprestimos' ? 'text-[#10B981]' : 'text-gray-600'}`}
+        >
+          <Landmark className="w-6 h-6" />
+          <span className="text-[10px] font-bold uppercase tracking-tighter hidden sm:inline">Empréstimos</span>
         </button>
       </nav>
 
