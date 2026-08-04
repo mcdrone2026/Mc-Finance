@@ -112,7 +112,14 @@ export default function McFinanceApp() {
         setIsSyncing(true);
         const { data: expData, error: expError } = await supabase.from('expenses').select('*');
         const { data: revData, error: revError } = await supabase.from('revenues').select('*');
-        const { data: loanData, error: loanError } = await supabase.from('loans').select('*').catch(() => ({ data: null, error: null })); // Fallback if table doesn't exist
+        
+        let loanData = null;
+        try {
+          const res = await supabase.from('loans').select('*');
+          loanData = res.data;
+        } catch (e) {
+          // Fallback if table doesn't exist
+        }
 
         if (expError || revError) throw expError || revError;
 
@@ -218,7 +225,7 @@ export default function McFinanceApp() {
 
     const syncLoans = async () => {
       try {
-        const { error } = await supabase.from('loans').upsert(loans).catch(() => ({ error: null })); // Fallback if table missing
+        const { error } = await supabase.from('loans').upsert(loans);
         if (error) throw error;
       } catch (error) {
         console.error('Supabase sync error (loans):', error);
