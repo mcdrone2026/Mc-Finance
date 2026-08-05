@@ -103,11 +103,6 @@ export default function McFinanceApp() {
   // Supabase Sync Logic
   useEffect(() => {
     const fetchData = async () => {
-      if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-        setSyncStatus('local');
-        return;
-      }
-
       try {
         setIsSyncing(true);
         const { data: expData, error: expError } = await supabase.from('expenses').select('*');
