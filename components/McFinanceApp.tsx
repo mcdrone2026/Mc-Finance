@@ -97,6 +97,7 @@ export default function McFinanceApp() {
   const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
   const [showForm, setShowForm] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'local' | 'error'>('local');
+  const [expandedPerson, setExpandedPerson] = useState<string | null>(null);
   const isInitialLoad = useRef(true);
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -315,15 +316,43 @@ export default function McFinanceApp() {
       'Nubank': 0, 'Neon': 0, 'Bradesco': 0, 'C6Bank': 0, 'Pix': 0
     };
 
-    // Detailed receivables for the current month
-    const pendingReceivables: { expenseId: string, person: Person, amount: number, description: string }[] = [];
-    const perPersonToReceive: Record<Person, number> = {
-      'Mccley': 0, 'Paula': 0, 'Tarcilla': 0, 'Jan': 0, 'Saulo': 0, 'Jorge': 0, 'Edielton': 0
+    // Detailed receivables
+    type ReceivableItem = { id: string; type: 'expense' | 'loan'; amount: number; description: string; isOverdue: boolean; date: Date };
+    type PersonReceivables = { person: Person; total: number; overdueTotal: number; currentTotal: number; items: ReceivableItem[] };
+    
+    const groupedReceivables: Record<Person, PersonReceivables> = {
+      'Mccley': { person: 'Mccley', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Paula': { person: 'Paula', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Tarcilla': { person: 'Tarcilla', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Jan': { person: 'Jan', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Saulo': { person: 'Saulo', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Jorge': { person: 'Jorge', total: 0, overdueTotal: 0, currentTotal: 0, items: [] },
+      'Edielton': { person: 'Edielton', total: 0, overdueTotal: 0, currentTotal: 0, items: [] }
+    };
+
+    const processReceivable = (person: Person, share: number, exp: Expense, isCurrentMonth: boolean, isPastMonth: boolean) => {
+      if ((isCurrentMonth || isPastMonth) && !exp.receivedFrom?.includes(person)) {
+        groupedReceivables[person].items.push({
+          id: exp.id,
+          type: 'expense',
+          amount: share,
+          description: exp.description,
+          isOverdue: isPastMonth,
+          date: new Date(exp.dueDate)
+        });
+        groupedReceivables[person].total += share;
+        if (isPastMonth) groupedReceivables[person].overdueTotal += share;
+        else groupedReceivables[person].currentTotal += share;
+      }
     };
 
     expenses.forEach(exp => {
       const expDate = new Date(exp.dueDate);
-      const isCurrentMonth = expDate.getMonth() === currentMonth && expDate.getFullYear() === currentYear;
+      const expMonth = expDate.getMonth();
+      const expYear = expDate.getFullYear();
+      
+      const isCurrentMonth = expMonth === currentMonth && expYear === currentYear;
+      const isPastMonth = expYear < currentYear || (expYear === currentYear && expMonth < currentMonth);
 
       let mccleyShare = 0;
 
@@ -336,35 +365,23 @@ export default function McFinanceApp() {
 
         exp.splitWith.forEach(person => {
           if (person !== 'Mccley') {
-            perPersonToReceive[person] += share;
-            if (isCurrentMonth && !exp.receivedFrom?.includes(person)) {
-              pendingReceivables.push({ expenseId: exp.id, person, amount: share, description: exp.description });
-            }
+            processReceivable(person, share, exp, isCurrentMonth, isPastMonth);
           }
         });
       } else if (exp.costCenter === 'Individual' && exp.individualPerson) {
         if (exp.individualPerson === 'Mccley') {
           mccleyShare = exp.value;
         } else {
-          perPersonToReceive[exp.individualPerson] += exp.value;
-          if (isCurrentMonth && !exp.receivedFrom?.includes(exp.individualPerson)) {
-            pendingReceivables.push({ expenseId: exp.id, person: exp.individualPerson, amount: exp.value, description: exp.description });
-          }
+          processReceivable(exp.individualPerson, exp.value, exp, isCurrentMonth, isPastMonth);
         }
       } else if (exp.costCenter === 'Lunna 50%') {
         const share = exp.value * 0.5;
         mccleyShare = share;
-        perPersonToReceive['Tarcilla'] += share;
-        if (isCurrentMonth && !exp.receivedFrom?.includes('Tarcilla')) {
-          pendingReceivables.push({ expenseId: exp.id, person: 'Tarcilla', amount: share, description: `${exp.description} (50%)` });
-        }
+        processReceivable('Tarcilla', share, exp, isCurrentMonth, isPastMonth);
       } else if (exp.costCenter === 'Lunna 30%') {
         mccleyShare = exp.value * 0.7;
         const share = exp.value * 0.3;
-        perPersonToReceive['Tarcilla'] += share;
-        if (isCurrentMonth && !exp.receivedFrom?.includes('Tarcilla')) {
-          pendingReceivables.push({ expenseId: exp.id, person: 'Tarcilla', amount: share, description: `${exp.description} (30%)` });
-        }
+        processReceivable('Tarcilla', share, exp, isCurrentMonth, isPastMonth);
       }
 
       mccleyTotalExpenses += mccleyShare;
@@ -376,8 +393,27 @@ export default function McFinanceApp() {
       }
     });
 
-    const totalToReceive = Object.values(perPersonToReceive).reduce((a, b) => a + b, 0);
-    const currentMonthToReceive = pendingReceivables.reduce((acc, curr) => acc + curr.amount, 0);
+    // Add loans to current receivables
+    loans.forEach(loan => {
+      if (loan.installmentsPaid < loan.installmentsTotal) {
+        const person = loan.person as Person;
+        if (groupedReceivables[person]) {
+          groupedReceivables[person].items.push({
+            id: loan.id,
+            type: 'loan',
+            amount: loan.monthlyValue,
+            description: `Empréstimo (${loan.description})`,
+            isOverdue: false,
+            date: new Date()
+          });
+          groupedReceivables[person].total += loan.monthlyValue;
+          groupedReceivables[person].currentTotal += loan.monthlyValue;
+        }
+      }
+    });
+
+    const activeReceivables = Object.values(groupedReceivables).filter(g => g.total > 0);
+    const currentMonthToReceive = activeReceivables.reduce((acc, curr) => acc + curr.total, 0); // Using total (overdue + current)
 
     const currentMonthRevenue = revenues.find(r => r.month === currentMonth && r.year === currentYear)?.value || 0;
 
@@ -451,10 +487,8 @@ export default function McFinanceApp() {
       mccleyTotalExpenses,
       currentMonthMccleyExpenses,
       mccleyExpensesByCard,
-      totalToReceive,
       currentMonthToReceive,
-      perPersonToReceive,
-      pendingReceivables,
+      activeReceivables,
       currentMonthRevenue,
       futureExpensesData,
       filteredExpenses,
@@ -463,20 +497,35 @@ export default function McFinanceApp() {
       reportRevenue,
       reportByCategory
     };
-  }, [expenses, reportFilters, revenues]);
+  }, [expenses, reportFilters, revenues, loans]);
 
-  const handleToggleReceived = (expenseId: string, person: Person) => {
-    setExpenses(prev => prev.map(exp => {
-      if (exp.id === expenseId) {
-        const receivedFrom = exp.receivedFrom || [];
-        if (receivedFrom.includes(person)) {
-          return { ...exp, receivedFrom: receivedFrom.filter(p => p !== person) };
-        } else {
-          return { ...exp, receivedFrom: [...receivedFrom, person] };
+  const handleToggleReceived = (id: string, person: Person, type: 'expense' | 'loan') => {
+    if (type === 'expense') {
+      setExpenses(prev => prev.map(exp => {
+        if (exp.id === id) {
+          const receivedFrom = exp.receivedFrom || [];
+          if (receivedFrom.includes(person)) {
+            return { ...exp, receivedFrom: receivedFrom.filter(p => p !== person) };
+          } else {
+            return { ...exp, receivedFrom: [...receivedFrom, person] };
+          }
         }
-      }
-      return exp;
-    }));
+        return exp;
+      }));
+    } else if (type === 'loan') {
+      setLoans(prev => prev.map(loan => {
+        if (loan.id === id) {
+          // Add a payment for the current month
+          const payment = { date: new Date().toISOString(), amount: loan.monthlyValue };
+          return {
+            ...loan,
+            installmentsPaid: loan.installmentsPaid + 1,
+            paymentHistory: [...(loan.paymentHistory || []), payment]
+          };
+        }
+        return loan;
+      }));
+    }
   };
 
   const exportToPDF = () => {
@@ -660,14 +709,15 @@ export default function McFinanceApp() {
         {activeTab === 'ledger' ? (
           <div className="space-y-8">
             {/* Revenue/Expenses Grid */}
-            <div className="grid grid-cols-2 gap-4 pt-4">
-              <div className="bg-[#171717] p-6 rounded-2xl border border-white/5">
-                <p className="text-[10px] uppercase tracking-widest font-bold text-[#10B981] mb-4">Receita</p>
-                <p className="text-2xl font-bold">R$ {totals.currentMonthRevenue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-              </div>
-              <div className="bg-[#171717] p-6 rounded-2xl border border-white/5">
-                <p className="text-[10px] uppercase tracking-widest font-bold text-red-500 mb-4">Despesa Total</p>
-                <p className="text-2xl font-bold">R$ {totals.currentMonthMccleyExpenses.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+            <div className="grid grid-cols-1 gap-4 pt-4">
+              <div className="bg-[#171717] p-8 rounded-3xl border border-white/5 shadow-xl shadow-red-900/10">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-8 h-8 rounded-lg bg-red-900/20 flex items-center justify-center">
+                    <TrendingDown className="w-4 h-4 text-red-500" />
+                  </div>
+                  <p className="text-[10px] uppercase tracking-widest font-bold text-red-500">Despesa Total (Mês Atual)</p>
+                </div>
+                <p className="text-4xl font-bold">R$ {totals.currentMonthMccleyExpenses.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
               </div>
             </div>
 
@@ -676,7 +726,7 @@ export default function McFinanceApp() {
               <div className="flex justify-between items-end">
                 <div>
                   <h3 className="text-2xl font-bold">Valores a Receber</h3>
-                  <p className="text-sm text-gray-500">Recebíveis pendentes do mês em exercício</p>
+                  <p className="text-sm text-gray-500">Recebíveis agrupados por pessoa</p>
                 </div>
                 <div className="text-right">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500 mb-1">Total Pendente</p>
@@ -686,32 +736,81 @@ export default function McFinanceApp() {
                 </div>
               </div>
 
-              {/* All Pending Receivables List */}
+              {/* Grouped Receivables List */}
               <div className="space-y-4">
-                {totals.pendingReceivables.length === 0 ? (
+                {totals.activeReceivables.length === 0 ? (
                   <div className="bg-[#171717] p-8 rounded-3xl border border-white/5 text-center text-gray-600">
-                    Nenhum recebível pendente para este mês.
+                    Nenhum recebível pendente no momento.
                   </div>
                 ) : (
-                  totals.pendingReceivables.map((item, idx) => (
-                    <div key={`${item.expenseId}-${item.person}-${idx}`} className="bg-[#171717] p-6 rounded-2xl border border-white/5 flex justify-between items-center">
-                      <div className="flex items-center gap-4">
-                        <input 
-                          type="checkbox" 
-                          className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981]"
-                          onChange={() => handleToggleReceived(item.expenseId, item.person)}
-                        />
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-gray-200">{item.person}</span>
-                            <span className="text-[10px] text-gray-500 uppercase tracking-tighter">({item.description})</span>
+                  totals.activeReceivables.map((group, idx) => (
+                    <div key={`${group.person}-${idx}`} className="bg-[#171717] rounded-3xl border border-white/5 overflow-hidden transition-all duration-300">
+                      <div 
+                        className="p-6 flex justify-between items-center cursor-pointer hover:bg-white/5 transition-colors"
+                        onClick={() => setExpandedPerson(expandedPerson === group.person ? null : group.person)}
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-[#262626] rounded-full flex items-center justify-center border border-white/10 text-[#10B981] font-bold text-lg">
+                            {group.person.charAt(0)}
                           </div>
-                          <p className="text-xl font-bold text-red-500">
-                            R$ {item.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                          <div>
+                            <span className="font-bold text-xl text-gray-100">{group.person}</span>
+                            <div className="flex gap-4 mt-1 text-xs">
+                              {group.overdueTotal > 0 && (
+                                <span className="font-bold text-red-500">Vencido: R$ {group.overdueTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                              )}
+                              {group.currentTotal > 0 && (
+                                <span className="font-bold text-gray-400">Vencendo: R$ {group.currentTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <p className="text-2xl font-bold text-[#10B981]">
+                            R$ {group.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                           </p>
+                          <motion.div
+                            animate={{ rotate: expandedPerson === group.person ? 90 : 0 }}
+                            transition={{ duration: 0.2 }}
+                          >
+                            <ChevronRight className="w-6 h-6 text-gray-600" />
+                          </motion.div>
                         </div>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-gray-700" />
+
+                      <AnimatePresence>
+                        {expandedPerson === group.person && (
+                          <motion.div 
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden border-t border-white/5 bg-[#0A0A0A]/30"
+                          >
+                            <div className="p-6 space-y-3">
+                              {group.items.sort((a, b) => Number(b.isOverdue) - Number(a.isOverdue)).map((item, i) => (
+                                <div key={`${item.id}-${i}`} className="flex justify-between items-center p-4 bg-[#171717] rounded-xl border border-white/5">
+                                  <div className="flex items-center gap-4">
+                                    <input 
+                                      type="checkbox" 
+                                      className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981]"
+                                      onChange={() => handleToggleReceived(item.id, group.person, item.type)}
+                                    />
+                                    <div>
+                                      <p className="font-bold text-sm text-gray-200">{item.description}</p>
+                                      <p className={`text-[10px] font-bold uppercase tracking-wider ${item.isOverdue ? 'text-red-500' : 'text-gray-500'}`}>
+                                        {item.isOverdue ? `Vencido (${item.date.toLocaleDateString('pt-BR')})` : 'Mês Atual'} {item.type === 'loan' ? '• Empréstimo' : ''}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <p className="font-bold text-gray-300">
+                                    R$ {item.amount.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   ))
                 )}
