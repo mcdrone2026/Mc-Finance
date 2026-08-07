@@ -452,27 +452,38 @@ export default function McFinanceApp() {
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
       const matchesPerson = reportFilters.person === 'Todos' || 
         (exp.costCenter === 'Individual' && exp.individualPerson === reportFilters.person) ||
-        (exp.costCenter === 'Compartilhado' && exp.splitWith?.includes(reportFilters.person as Person));
+        (exp.costCenter === 'Compartilhado' && exp.splitWith?.includes(reportFilters.person as Person)) ||
+        (reportFilters.person === 'Tarcilla' && (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%'));
 
       return matchesMonth && matchesCategory && matchesCostCenter && matchesPerson;
     });
 
     const reportTotal = filteredExpenses.reduce((acc, curr) => acc + curr.value, 0);
 
-    const mccleyReportTotal = filteredExpenses.reduce((acc, exp) => {
-      let mccleyShare = 0;
+    const personReportTotal = filteredExpenses.reduce((acc, exp) => {
+      let share = 0;
+      const targetPerson = reportFilters.person === 'Todos' ? 'Mccley' : reportFilters.person;
+
       if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
         const includesMccley = exp.splitWith.includes('Mccley');
         const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
-        mccleyShare = exp.value / divisor;
-      } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
-        mccleyShare = exp.value;
+        if (targetPerson === 'Mccley') {
+          share = exp.value / divisor;
+        } else if (exp.splitWith.includes(targetPerson as Person)) {
+          share = exp.value / divisor;
+        }
+      } else if (exp.costCenter === 'Individual') {
+        if (exp.individualPerson === targetPerson) {
+          share = exp.value;
+        }
       } else if (exp.costCenter === 'Lunna 50%') {
-        mccleyShare = exp.value * 0.5;
+        if (targetPerson === 'Mccley') share = exp.value * 0.5;
+        if (targetPerson === 'Tarcilla') share = exp.value * 0.5;
       } else if (exp.costCenter === 'Lunna 30%') {
-        mccleyShare = exp.value * 0.7;
+        if (targetPerson === 'Mccley') share = exp.value * 0.7;
+        if (targetPerson === 'Tarcilla') share = exp.value * 0.3;
       }
-      return acc + mccleyShare;
+      return acc + share;
     }, 0);
 
     const reportRevenue = revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.netSalary || 
@@ -493,7 +504,7 @@ export default function McFinanceApp() {
       futureExpensesData,
       filteredExpenses,
       reportTotal,
-      mccleyReportTotal,
+      personReportTotal,
       reportRevenue,
       reportByCategory
     };
@@ -543,25 +554,9 @@ export default function McFinanceApp() {
     const filterText = `Filtros: ${monthNames[reportFilters.month]}/${reportFilters.year} | Categoria: ${reportFilters.category} | Centro de Custo: ${reportFilters.costCenter} | Pessoa: ${reportFilters.person}`;
     doc.text(filterText, 14, 30);
     
-    // Summary
-    doc.setFontSize(12);
-    doc.setTextColor(0);
-    doc.text(`Total Filtrado: R$ ${totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 40);
-    doc.text(`Despesas Mccley: R$ ${totals.mccleyReportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 46);
-    doc.text(`Receita Líquida: R$ ${totals.reportRevenue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 52);
-    
-    const balance = totals.reportRevenue - totals.mccleyReportTotal;
-    doc.setFontSize(14);
-    if (balance >= 0) {
-      doc.setTextColor(16, 185, 129); // Green
-    } else {
-      doc.setTextColor(239, 68, 68); // Red
-    }
-    doc.text(`Saldo do Mês (Mccley): R$ ${balance.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`, 14, 60);
-
     doc.setTextColor(0);
     doc.setFontSize(10);
-    doc.text(`Quantidade de Lançamentos: ${totals.filteredExpenses.length}`, 14, 68);
+    doc.text(`Quantidade de Lançamentos: ${totals.filteredExpenses.length}`, 14, 40);
 
     // Table
     const tableColumn = ['Descrição', 'Vencimento', 'Centro de Custo', 'Valor (R$)', 'Categoria', 'Cartão'];
@@ -574,14 +569,29 @@ export default function McFinanceApp() {
       exp.card
     ]);
 
+    tableRows.push([
+      'TOTAL',
+      '',
+      '',
+      totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 }),
+      '',
+      ''
+    ]);
+
     autoTable(doc, {
       head: [tableColumn],
       body: tableRows,
-      startY: 75,
+      startY: 45,
       theme: 'grid',
       headStyles: { fillColor: [16, 185, 129], textColor: [0, 0, 0], fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [245, 245, 245] },
-      margin: { top: 75 },
+      margin: { top: 45 },
+      didParseCell: function(data: any) {
+        if (data.section === 'body' && data.row.index === tableRows.length - 1) {
+          data.cell.styles.fontStyle = 'bold';
+          data.cell.styles.fillColor = [230, 230, 230];
+        }
+      }
     });
 
     doc.save(`relatorio_financeiro_${new Date().toISOString().split('T')[0]}.pdf`);
@@ -1151,13 +1161,15 @@ export default function McFinanceApp() {
             {/* Dashboard Visual */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Balance Summary Card */}
-              <div className={`p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${totals.reportRevenue - totals.mccleyReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20'}`}>
+              <div className={`p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${reportFilters.person === 'Todos' ? (totals.reportRevenue - totals.personReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20') : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/20'}`}>
                 <div className="relative z-10">
                   <div className="flex justify-between items-start mb-6">
                     <div>
-                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-1">Mccley - Saldo do Mês</p>
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-1">
+                        {reportFilters.person === 'Todos' ? 'Mccley - Saldo do Mês' : `${reportFilters.person} - Total Selecionado`}
+                      </p>
                       <h3 className="text-4xl font-bold">
-                        R$ {(totals.reportRevenue - totals.mccleyReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.personReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                       </h3>
                     </div>
                     <button 
@@ -1168,6 +1180,7 @@ export default function McFinanceApp() {
                     </button>
                   </div>
                   
+                  {reportFilters.person === 'Todos' && (
                   <div className="space-y-3 pt-4 border-t border-white/20">
                     <div className="flex justify-between items-center text-sm">
                       <span className="font-bold opacity-80">Receita Líquida:</span>
@@ -1175,9 +1188,10 @@ export default function McFinanceApp() {
                     </div>
                     <div className="flex justify-between items-center text-sm">
                       <span className="font-bold opacity-80">Despesas (Sua parte):</span>
-                      <span className="font-bold">- R$ {totals.mccleyReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                      <span className="font-bold">- R$ {totals.personReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
                     </div>
                   </div>
+                  )}
                 </div>
                 <BarChart3 className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 -rotate-12" />
               </div>
