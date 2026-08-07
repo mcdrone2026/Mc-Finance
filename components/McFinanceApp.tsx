@@ -57,6 +57,7 @@ interface Expense {
   receivedFrom?: Person[]; // Track who has already paid their share
   isRecurring?: boolean;
   recurringCount?: number; // Number of times to repeat
+  groupId?: string; // Para agrupar parcelas
 }
 
 interface MonthlyRevenue {
@@ -135,7 +136,8 @@ export default function McFinanceApp() {
             card: e.card,
             createdAt: e.created_at,
             receivedFrom: e.received_from,
-            isRecurring: e.is_recurring
+            isRecurring: e.is_recurring,
+            groupId: e.group_id
           }));
           setExpenses(formattedExpenses);
         }
@@ -193,7 +195,8 @@ export default function McFinanceApp() {
           card: e.card,
           created_at: e.createdAt,
           received_from: e.receivedFrom,
-          is_recurring: e.isRecurring
+          is_recurring: e.isRecurring,
+          group_id: e.groupId
         }));
 
         // Simple approach: delete all and re-insert or upsert
@@ -259,6 +262,7 @@ export default function McFinanceApp() {
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [applyToFuture, setApplyToFuture] = useState(false);
 
   // Filter State for Reports
   const [reportFilters, setReportFilters] = useState({
@@ -266,7 +270,8 @@ export default function McFinanceApp() {
     year: new Date().getFullYear(),
     category: 'Todas',
     costCenter: 'Todos',
-    person: 'Todos'
+    person: 'Todos',
+    status: 'Em Aberto' // 'Todas', 'Pagas', 'Em Aberto'
   });
 
   // Form State
@@ -470,19 +475,50 @@ export default function McFinanceApp() {
       futureExpensesData.push({ month: monthNamesShort[m], value: monthlyMccleyTotal });
     }
 
+    // Helper para agrupar retroativamente (heurística)
+    const getGroupId = (exp: Expense) => {
+      if (exp.groupId) return exp.groupId;
+      const baseDesc = exp.description.replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+      return `retro-${baseDesc}-${exp.value}-${exp.costCenter}`;
+    };
+
     // Filtered expenses for the report
     const filteredExpenses = expenses.filter(exp => {
       const expDate = new Date(exp.dueDate);
       const matchesMonth = expDate.getMonth() === reportFilters.month && expDate.getFullYear() === reportFilters.year;
       const matchesCategory = reportFilters.category === 'Todas' || exp.category === reportFilters.category;
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
-      const matchesPerson = reportFilters.person === 'Todos' || 
-        (exp.costCenter === 'Individual' && exp.individualPerson === reportFilters.person) ||
-        (exp.costCenter === 'Compartilhado' && exp.splitWith?.includes(reportFilters.person as Person)) ||
-        (reportFilters.person === 'Tarcilla' && (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%'));
+      
+      let belongsToPerson = false;
+      if (reportFilters.person === 'Todos') {
+        belongsToPerson = true;
+      } else {
+        if (exp.costCenter === 'Individual' && exp.individualPerson === reportFilters.person) belongsToPerson = true;
+        if (exp.costCenter === 'Compartilhado' && exp.splitWith?.includes(reportFilters.person as Person)) belongsToPerson = true;
+        if (reportFilters.person === 'Tarcilla' && (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%')) belongsToPerson = true;
+      }
 
-      return matchesMonth && matchesCategory && matchesCostCenter && matchesPerson;
-    });
+      const matchesPerson = belongsToPerson;
+
+      // Status logic: "Paid" if all responsible people are in receivedFrom
+      let isPaid = false;
+      if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+        const peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
+        isPaid = peopleToPay.length > 0 && peopleToPay.every(p => exp.receivedFrom?.includes(p));
+      } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
+        isPaid = !!exp.receivedFrom?.includes(exp.individualPerson);
+      } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
+        isPaid = !!exp.receivedFrom?.includes('Tarcilla');
+      } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
+        isPaid = true; // Mccley's own individual expenses don't have receivables, treat as paid
+      }
+
+      let matchesStatus = true;
+      if (reportFilters.status === 'Pagas') matchesStatus = isPaid;
+      if (reportFilters.status === 'Em Aberto') matchesStatus = !isPaid;
+
+      return matchesMonth && matchesCategory && matchesCostCenter && matchesPerson && matchesStatus;
+    }).map(exp => ({ ...exp, groupId: getGroupId(exp) }));
 
     const reportTotal = filteredExpenses.reduce((acc, curr) => acc + curr.value, 0);
 
@@ -565,6 +601,32 @@ export default function McFinanceApp() {
     }
   };
 
+  const handleToggleAllReceived = (exp: Expense) => {
+    let peopleToPay: Person[] = [];
+    if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+      peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
+    } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
+      peopleToPay = [exp.individualPerson];
+    } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
+      peopleToPay = ['Tarcilla'];
+    }
+
+    if (peopleToPay.length === 0) return;
+
+    const isPaid = peopleToPay.every(p => exp.receivedFrom?.includes(p));
+    setExpenses(prev => prev.map(e => {
+      if (e.id === exp.id) {
+        if (isPaid) {
+          return { ...e, receivedFrom: (e.receivedFrom || []).filter(p => !peopleToPay.includes(p)) };
+        } else {
+          const newReceived = new Set([...(e.receivedFrom || []), ...peopleToPay]);
+          return { ...e, receivedFrom: Array.from(newReceived) };
+        }
+      }
+      return e;
+    }));
+  };
+
   const exportToPDF = () => {
     const doc = new jsPDF();
     
@@ -627,14 +689,38 @@ export default function McFinanceApp() {
     e.preventDefault();
     
     if (editingId) {
-      setExpenses(expenses.map(exp => 
-        exp.id === editingId ? { ...exp, ...formData as Expense } : exp
-      ));
+      const originalExpense = expenses.find(exp => exp.id === editingId);
+      if (applyToFuture && originalExpense && originalExpense.groupId) {
+        setExpenses(expenses.map(exp => {
+          if (exp.id === editingId) {
+            return { ...exp, ...formData as Expense };
+          } else if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) {
+            // Update future installments in the same group with the same new values (except dates and id)
+            return {
+              ...exp,
+              costCenter: formData.costCenter as CostCenter,
+              splitWith: formData.splitWith,
+              individualPerson: formData.individualPerson,
+              description: formData.description || exp.description, // keep original desc if empty
+              value: formData.value || exp.value,
+              category: formData.category as Category,
+              card: formData.card as Card,
+            };
+          }
+          return exp;
+        }));
+      } else {
+        setExpenses(expenses.map(exp => 
+          exp.id === editingId ? { ...exp, ...formData as Expense } : exp
+        ));
+      }
       setEditingId(null);
+      setApplyToFuture(false);
     } else if (formData.isRecurring) {
       const baseDate = new Date(formData.dueDate || '');
       const newEntries: Expense[] = [];
       const count = formData.recurringCount || 2;
+      const groupId = Math.random().toString(36).substr(2, 9);
       
       for (let i = 0; i < count; i++) {
         const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
@@ -646,6 +732,7 @@ export default function McFinanceApp() {
         newEntries.push({
           ...formData as Expense,
           id: Math.random().toString(36).substr(2, 9),
+          groupId,
           dueDate: d.toISOString().split('T')[0],
           createdAt: Date.now()
         });
@@ -668,12 +755,23 @@ export default function McFinanceApp() {
   const handleEdit = (expense: Expense) => {
     setFormData(expense);
     setEditingId(expense.id);
+    setApplyToFuture(false);
     setActiveTab('expenses');
   };
 
   const handleDelete = (id: string) => {
-    setExpenses(expenses.filter(exp => exp.id !== id));
+    const originalExpense = expenses.find(exp => exp.id === id);
+    if (applyToFuture && originalExpense && originalExpense.groupId) {
+      setExpenses(expenses.filter(exp => {
+        if (exp.id === id) return false;
+        if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) return false;
+        return true;
+      }));
+    } else {
+      setExpenses(expenses.filter(exp => exp.id !== id));
+    }
     setShowDeleteConfirm(null);
+    setApplyToFuture(false);
   };
 
   const togglePersonInSplit = (person: Person) => {
@@ -1245,6 +1343,20 @@ export default function McFinanceApp() {
               </div>
 
               {/* Submit Button */}
+              {editingId && expenses.find(e => e.id === editingId)?.groupId && (
+                <div className="flex items-center gap-3 p-4 bg-[#262626]/50 rounded-2xl border border-white/5 mb-4">
+                  <input 
+                    type="checkbox" 
+                    id="applyToFuture"
+                    checked={applyToFuture}
+                    onChange={(e) => setApplyToFuture(e.target.checked)}
+                    className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
+                  />
+                  <label htmlFor="applyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer">
+                    Aplicar alterações a esta e a todas as parcelas futuras deste lançamento.
+                  </label>
+                </div>
+              )}
               <button 
                 type="submit"
                 className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] hover:from-[#34D399] hover:to-[#10B981] text-black py-6 rounded-2xl font-bold text-xl flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/20 active:scale-[0.98] transition-all"
@@ -1262,7 +1374,7 @@ export default function McFinanceApp() {
 
             {/* Filters */}
             <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-6">
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Mês</p>
                   <select 
@@ -1318,6 +1430,18 @@ export default function McFinanceApp() {
                   >
                     <option value="Todos">Todos</option>
                     {PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Status</p>
+                  <select 
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    value={reportFilters.status}
+                    onChange={(e) => setReportFilters({ ...reportFilters, status: e.target.value })}
+                  >
+                    <option value="Em Aberto">Em Aberto</option>
+                    <option value="Pagas">Pagas</option>
+                    <option value="Todas">Todas</option>
                   </select>
                 </div>
               </div>
@@ -1397,14 +1521,40 @@ export default function McFinanceApp() {
                   Nenhuma despesa encontrada para os filtros aplicados.
                 </div>
               ) : (
-                totals.filteredExpenses.map((exp) => (
-                  <div key={exp.id} className="bg-[#171717] p-6 rounded-2xl border border-white/5 flex justify-between items-center group">
+                totals.filteredExpenses.map((exp) => {
+                  let isPaid = false;
+                  if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+                    const peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
+                    isPaid = peopleToPay.length > 0 && peopleToPay.every(p => exp.receivedFrom?.includes(p));
+                  } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
+                    isPaid = !!exp.receivedFrom?.includes(exp.individualPerson);
+                  } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
+                    isPaid = !!exp.receivedFrom?.includes('Tarcilla');
+                  } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
+                    isPaid = true;
+                  }
+
+                  const hasPeopleToPay = !(exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley');
+
+                  return (
+                  <div key={exp.id} className={`p-6 rounded-2xl border flex justify-between items-center group transition-colors ${isPaid ? 'bg-[#064E3B]/10 border-[#10B981]/20' : 'bg-[#171717] border-white/5'}`}>
                     <div className="flex items-center gap-4">
+                      {hasPeopleToPay && (
+                        <input 
+                          type="checkbox" 
+                          checked={isPaid}
+                          onChange={() => handleToggleAllReceived(exp)}
+                          className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
+                        />
+                      )}
                       <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${exp.category === 'Lunna' ? 'bg-purple-900/20 text-purple-400' : 'bg-emerald-900/20 text-[#10B981]'}`}>
                         <Receipt className="w-6 h-6" />
                       </div>
                       <div>
-                        <p className="font-bold">{exp.description}</p>
+                        <div className="flex items-center gap-2">
+                          <p className={`font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-white'}`}>{exp.description}</p>
+                          {isPaid && <CheckCircle className="w-4 h-4 text-[#10B981]" />}
+                        </div>
                         <div className="flex items-center gap-2">
                           <p className="text-xs text-gray-500">{new Date(exp.dueDate).toLocaleDateString('pt-BR')}</p>
                           <span className="w-1 h-1 rounded-full bg-gray-700" />
@@ -2015,6 +2165,22 @@ export default function McFinanceApp() {
                 <h4 className="text-xl font-bold">Excluir Lançamento?</h4>
                 <p className="text-gray-500 text-sm">Esta ação não pode ser desfeita. O valor será removido do seu livro caixa.</p>
               </div>
+              
+              {showDeleteConfirm && expenses.find(e => e.id === showDeleteConfirm)?.groupId && (
+                <div className="flex items-start gap-3 p-4 bg-[#262626]/50 rounded-xl border border-white/5 text-left">
+                  <input 
+                    type="checkbox" 
+                    id="deleteApplyToFuture"
+                    checked={applyToFuture}
+                    onChange={(e) => setApplyToFuture(e.target.checked)}
+                    className="w-5 h-5 mt-0.5 rounded border-gray-700 bg-transparent text-red-500 focus:ring-red-500 cursor-pointer"
+                  />
+                  <label htmlFor="deleteApplyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer leading-tight">
+                    Excluir também todas as parcelas futuras associadas a este lançamento.
+                  </label>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-4">
                 <button 
                   onClick={() => setShowDeleteConfirm(null)}
