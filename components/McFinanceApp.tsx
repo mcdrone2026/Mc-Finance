@@ -697,19 +697,28 @@ export default function McFinanceApp() {
       
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
-        const [monthStr, year, salary, commission, dsr, netSalary] = lines[i].split(',').map(s => s.trim());
+        const separator = lines[0].includes(';') ? ';' : ',';
+        const cols = lines[i].split(separator).map(s => s.trim());
+        
+        // Se usar ',' como separador mas tiver mais colunas, o CSV quebrou devido às vírgulas nos decimais
+        if (separator === ',' && cols.length > 6) {
+           alert(`Erro na linha ${i}: O arquivo CSV está usando vírgulas para separar as colunas e também nos números decimais. Por favor, baixe o novo modelo e use ponto-e-vírgula (;) para separar as colunas.`);
+           return;
+        }
+
+        const [monthStr, year, salary, commission, dsr, netSalary] = cols;
         
         const monthMap: Record<string, number> = {
           'janeiro': 0, 'fevereiro': 1, 'março': 2, 'abril': 3, 'maio': 4, 'junho': 5,
           'julho': 6, 'agosto': 7, 'setembro': 8, 'outubro': 9, 'novembro': 10, 'dezembro': 11
         };
-        const month = monthMap[monthStr.toLowerCase()];
+        const month = monthMap[(monthStr || '').toLowerCase()];
         
         if (month !== undefined) {
-          const s = parseFloat(salary) || 0;
-          const c = parseFloat(commission) || 0;
-          const d = parseFloat(dsr) || 0;
-          const ns = parseFloat(netSalary) || 0;
+          const s = parseFloat((salary || '0').replace(/\./g, '').replace(',', '.')) || 0;
+          const c = parseFloat((commission || '0').replace(/\./g, '').replace(',', '.')) || 0;
+          const d = parseFloat((dsr || '0').replace(/\./g, '').replace(',', '.')) || 0;
+          const ns = parseFloat((netSalary || '0').replace(/\./g, '').replace(',', '.')) || 0;
           
           newRevenues.push({
             id: Math.random().toString(36).substr(2, 9),
@@ -736,7 +745,7 @@ export default function McFinanceApp() {
   };
 
   const downloadRevenueCSVTemplate = () => {
-    const csvContent = "Mês,Ano,Salário,Comissão,DSR,Salário Líquido\nAgosto,2026,5000,1000,500,5500\nSetembro,2026,5000,1200,600,5800";
+    const csvContent = "Mês;Ano;Salário;Comissão;DSR;Salário Líquido\nAgosto;2026;5000,00;1000,00;500,00;5500,00\nSetembro;2026;5000,00;1200,00;600,00;5800,00";
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -1092,20 +1101,20 @@ export default function McFinanceApp() {
                     {/* Payment Method */}
                     <div className="space-y-2">
                       <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Método de Pagamento</p>
-                      <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
+                      <div className="flex flex-wrap gap-2">
                         {CARDS.map(card => (
                           <button
                             key={card}
                             type="button"
                             onClick={() => setFormData({ ...formData, card })}
-                            className={`flex-shrink-0 flex-1 p-4 rounded-2xl border transition-all space-y-4 text-left min-w-[100px] ${
+                            className={`flex-1 p-3 rounded-2xl border transition-all flex flex-col items-center justify-center gap-2 min-w-[70px] ${
                               formData.card === card 
                                 ? 'bg-[#064E3B]/20 border-[#10B981] text-[#10B981] shadow-lg shadow-emerald-900/10' 
                                 : 'bg-[#262626]/50 border-transparent text-gray-500'
                             }`}
                           >
+                            <CreditCard className="w-5 h-5" />
                             <p className="text-[10px] font-bold uppercase">{card}</p>
-                            <CreditCard className="w-6 h-6" />
                           </button>
                         ))}
                       </div>
@@ -1624,6 +1633,19 @@ export default function McFinanceApp() {
                           <p className="text-[10px] uppercase text-[#10B981] font-bold tracking-widest mb-1">Líquido Recebido</p>
                           <p className="font-bold text-2xl text-[#10B981]">R$ {(r.netSalary || r.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                         </div>
+                        <button onClick={() => {
+                          setRevenueFormData({
+                            month: r.month,
+                            year: r.year,
+                            salary: r.salary || 0,
+                            commission: r.commission || 0,
+                            dsr: r.dsr || 0,
+                            netSalary: r.netSalary || r.value || 0
+                          });
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }} className="text-blue-500 p-3 hover:bg-blue-500/10 rounded-xl transition-colors self-center">
+                          <Edit2 className="w-5 h-5" />
+                        </button>
                         <button onClick={() => setRevenues(revenues.filter(rev => rev.id !== r.id))} className="text-red-500 p-3 hover:bg-red-500/10 rounded-xl transition-colors self-center">
                           <Trash2 className="w-5 h-5" />
                         </button>
