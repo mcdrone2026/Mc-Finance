@@ -141,18 +141,20 @@ export default function McFinanceApp() {
         }
 
         if (revData) {
-          const formattedRevenues = revData.map(r => ({
-            id: r.id,
-            month: r.month,
-            year: r.year,
-            value: r.value,
-            salary: r.salary,
-            commission: r.commission,
-            dsr: r.dsr,
-            grossSalary: r.gross_salary,
-            netSalary: r.net_salary
-          }));
-          setRevenues(formattedRevenues);
+          const groupedRevenues: Record<string, MonthlyRevenue> = {};
+          revData.forEach(r => {
+            const key = `${r.month}-${r.year}`;
+            if (!groupedRevenues[key]) {
+              groupedRevenues[key] = { id: key, month: r.month, year: r.year, salary: 0, commission: 0, dsr: 0, grossSalary: 0, netSalary: 0, value: 0 };
+            }
+            if (r.source === 'salary') groupedRevenues[key].salary = r.amount;
+            if (r.source === 'commission') groupedRevenues[key].commission = r.amount;
+            if (r.source === 'dsr') groupedRevenues[key].dsr = r.amount;
+            if (r.source === 'grossSalary') groupedRevenues[key].grossSalary = r.amount;
+            if (r.source === 'netSalary') groupedRevenues[key].netSalary = r.amount;
+            if (r.source === 'value') groupedRevenues[key].value = r.amount;
+          });
+          setRevenues(Object.values(groupedRevenues));
         }
 
         if (loanData) {
@@ -215,17 +217,16 @@ export default function McFinanceApp() {
 
     const syncRevenues = async () => {
       try {
-        const formattedRevenues = revenues.map(r => ({
-          id: r.id,
-          month: r.month,
-          year: r.year,
-          value: r.value,
-          salary: r.salary,
-          commission: r.commission,
-          dsr: r.dsr,
-          gross_salary: r.grossSalary,
-          net_salary: r.netSalary
-        }));
+        const formattedRevenues = revenues.flatMap(r => {
+          const rows = [];
+          if (r.salary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-salary`, month: r.month, year: r.year, person: 'Mccley', source: 'salary', amount: r.salary });
+          if (r.commission !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-commission`, month: r.month, year: r.year, person: 'Mccley', source: 'commission', amount: r.commission });
+          if (r.dsr !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-dsr`, month: r.month, year: r.year, person: 'Mccley', source: 'dsr', amount: r.dsr });
+          if (r.grossSalary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-grossSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'grossSalary', amount: r.grossSalary });
+          if (r.netSalary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-netSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'netSalary', amount: r.netSalary });
+          if (r.value !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-value`, month: r.month, year: r.year, person: 'Mccley', source: 'value', amount: r.value });
+          return rows;
+        });
         const { error } = await supabase.from('revenues').upsert(formattedRevenues);
         if (error) throw error;
         setSyncStatus('synced');
