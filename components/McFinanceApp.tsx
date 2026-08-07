@@ -1583,7 +1583,8 @@ export default function McFinanceApp() {
                       </div>
                     </div>
                   </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
