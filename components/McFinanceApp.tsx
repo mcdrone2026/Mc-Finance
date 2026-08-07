@@ -28,7 +28,8 @@ import {
   AlertCircle,
   Landmark,
   CheckCircle,
-  PiggyBank
+  PiggyBank,
+  Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
@@ -55,6 +56,7 @@ interface Expense {
   createdAt: number;
   receivedFrom?: Person[]; // Track who has already paid their share
   isRecurring?: boolean;
+  recurringCount?: number; // Number of times to repeat
 }
 
 interface MonthlyRevenue {
@@ -139,7 +141,18 @@ export default function McFinanceApp() {
         }
 
         if (revData) {
-          setRevenues(revData);
+          const formattedRevenues = revData.map(r => ({
+            id: r.id,
+            month: r.month,
+            year: r.year,
+            value: r.value,
+            salary: r.salary,
+            commission: r.commission,
+            dsr: r.dsr,
+            grossSalary: r.gross_salary,
+            netSalary: r.net_salary
+          }));
+          setRevenues(formattedRevenues);
         }
 
         if (loanData) {
@@ -202,7 +215,18 @@ export default function McFinanceApp() {
 
     const syncRevenues = async () => {
       try {
-        const { error } = await supabase.from('revenues').upsert(revenues);
+        const formattedRevenues = revenues.map(r => ({
+          id: r.id,
+          month: r.month,
+          year: r.year,
+          value: r.value,
+          salary: r.salary,
+          commission: r.commission,
+          dsr: r.dsr,
+          gross_salary: r.grossSalary,
+          net_salary: r.netSalary
+        }));
+        const { error } = await supabase.from('revenues').upsert(formattedRevenues);
         if (error) throw error;
         setSyncStatus('synced');
       } catch (error) {
@@ -255,7 +279,8 @@ export default function McFinanceApp() {
     value: 0,
     category: 'Fixa',
     card: 'Pix',
-    isRecurring: false
+    isRecurring: false,
+    recurringCount: 2
   };
 
   const [formData, setFormData] = useState<Partial<Expense>>(initialFormState);
@@ -607,14 +632,13 @@ export default function McFinanceApp() {
       setEditingId(null);
     } else if (formData.isRecurring) {
       const baseDate = new Date(formData.dueDate || '');
-      const year = baseDate.getFullYear();
-      const startMonth = baseDate.getMonth();
       const newEntries: Expense[] = [];
+      const count = formData.recurringCount || 2;
       
-      for (let m = startMonth; m <= 11; m++) {
-        const d = new Date(year, m, baseDate.getDate());
+      for (let i = 0; i < count; i++) {
+        const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
         // Handle month overflow (e.g. Jan 31 -> Feb 28/29)
-        if (d.getMonth() !== m) {
+        if (d.getMonth() !== (baseDate.getMonth() + i) % 12) {
           d.setDate(0);
         }
         
@@ -658,6 +682,68 @@ export default function McFinanceApp() {
     } else {
       setFormData({ ...formData, splitWith: [...current, person] });
     }
+  };
+
+  const handleRevenueCSVUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const lines = text.split('\n');
+      const newRevenues: MonthlyRevenue[] = [];
+      
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        const [monthStr, year, salary, commission, dsr, netSalary] = lines[i].split(',').map(s => s.trim());
+        
+        const monthMap: Record<string, number> = {
+          'janeiro': 0, 'fevereiro': 1, 'março': 2, 'abril': 3, 'maio': 4, 'junho': 5,
+          'julho': 6, 'agosto': 7, 'setembro': 8, 'outubro': 9, 'novembro': 10, 'dezembro': 11
+        };
+        const month = monthMap[monthStr.toLowerCase()];
+        
+        if (month !== undefined) {
+          const s = parseFloat(salary) || 0;
+          const c = parseFloat(commission) || 0;
+          const d = parseFloat(dsr) || 0;
+          const ns = parseFloat(netSalary) || 0;
+          
+          newRevenues.push({
+            id: Math.random().toString(36).substr(2, 9),
+            month,
+            year: parseInt(year),
+            salary: s,
+            commission: c,
+            dsr: d,
+            grossSalary: s + c + d,
+            netSalary: ns,
+            value: ns
+          });
+        }
+      }
+
+      if (newRevenues.length > 0) {
+        setRevenues(prev => {
+          const filtered = prev.filter(p => !newRevenues.some(nr => nr.month === p.month && nr.year === p.year));
+          return [...filtered, ...newRevenues];
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const downloadRevenueCSVTemplate = () => {
+    const csvContent = "Mês,Ano,Salário,Comissão,DSR,Salário Líquido\nAgosto,2026,5000,1000,500,5500\nSetembro,2026,5000,1200,600,5800";
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "modelo_receitas.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -911,180 +997,249 @@ export default function McFinanceApp() {
             </div>
 
             <form onSubmit={handleAddExpense} className="space-y-6 pb-12">
-              {/* Amount Card */}
-              <div className="bg-[#171717] p-8 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#10B981]">Valor da Transação</p>
-                <div className="flex items-baseline gap-4">
-                  <span className="text-3xl font-bold text-gray-600">R$</span>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    placeholder="0,00"
-                    className="bg-transparent text-6xl font-bold outline-none w-full placeholder:text-gray-800"
-                    value={formData.value || ''}
-                    onChange={(e) => setFormData({ ...formData, value: parseFloat(e.target.value) })}
-                    required
-                  />
-                </div>
-              </div>
-
-              {/* Cost Center Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Centro de Custo</p>
-                <select 
-                  className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none appearance-none"
-                  value={formData.costCenter}
-                  onChange={(e) => setFormData({ ...formData, costCenter: e.target.value as CostCenter })}
-                >
-                  {COST_CENTERS.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-
-              {/* Installments Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Parcelamento</p>
-                <select 
-                  className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none appearance-none"
-                  value={formData.installments}
-                  onChange={(e) => setFormData({ ...formData, installments: e.target.value })}
-                >
-                  <option value="À vista">À vista</option>
-                  {[...Array(12)].map((_, i) => (
-                    <option key={i} value={`${i + 1}x`}>{i + 1}x</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Recurring Toggle */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 bg-blue-900/20 rounded-xl flex items-center justify-center">
-                    <RefreshCw className={`w-5 h-5 ${formData.isRecurring ? 'text-blue-400' : 'text-gray-600'}`} />
+              {/* Bloco 1: Informações Básicas */}
+              <div className="bg-[#171717] p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-2xl">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-8 h-8 rounded-full bg-emerald-900/30 flex items-center justify-center">
+                    <Receipt className="w-4 h-4 text-[#10B981]" />
                   </div>
-                  <div>
-                    <p className="text-sm font-bold">Despesa Recorrente</p>
-                    <p className="text-[10px] text-gray-500 uppercase tracking-tight">Repetir até o fim do ano</p>
+                  <h3 className="text-lg font-bold text-white">Informações Básicas</h3>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Amount */}
+                  <div className="space-y-2 col-span-1 md:col-span-2">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#10B981]">Valor da Transação</p>
+                    <div className="flex items-baseline gap-4 bg-[#262626]/50 p-6 rounded-2xl border border-white/5 focus-within:border-[#10B981]/50 transition-colors">
+                      <span className="text-3xl font-bold text-gray-500">R$</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        placeholder="0,00"
+                        className="bg-transparent text-5xl font-bold outline-none w-full placeholder:text-gray-700 text-white"
+                        value={formData.value || ''}
+                        onChange={(e) => setFormData({ ...formData, value: parseFloat(e.target.value) })}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  {/* Description */}
+                  <div className="space-y-2">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Descrição</p>
+                    <div className="relative">
+                      <Tag className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-600" />
+                      <input 
+                        type="text" 
+                        placeholder="O que você comprou?"
+                        className="w-full bg-[#262626]/50 border border-white/5 focus:border-[#10B981]/50 rounded-xl p-4 pl-12 text-gray-300 outline-none placeholder:text-gray-600 transition-colors"
+                        value={formData.description}
+                        onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  {/* Date */}
+                  <div className="space-y-2">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Vencimento</p>
+                    <div className="relative">
+                      <input 
+                        type="date" 
+                        className="w-full bg-[#262626]/50 border border-white/5 focus:border-[#10B981]/50 rounded-xl p-4 text-gray-300 outline-none transition-colors"
+                        value={formData.dueDate}
+                        onChange={(e) => setFormData({ ...formData, dueDate: e.target.value })}
+                        required
+                      />
+                    </div>
                   </div>
                 </div>
-                <button 
-                  type="button"
-                  onClick={() => setFormData({ ...formData, isRecurring: !formData.isRecurring })}
-                  className={`w-12 h-6 rounded-full transition-colors relative ${formData.isRecurring ? 'bg-[#10B981]' : 'bg-gray-800'}`}
-                >
-                  <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${formData.isRecurring ? 'left-7' : 'left-1'}`} />
-                </button>
               </div>
 
-              {/* Category Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Categoria</p>
-                <div className="flex flex-wrap gap-2">
-                  {CATEGORIES.map(c => (
-                    <button
-                      key={c}
-                      type="button"
-                      onClick={() => setFormData({ ...formData, category: c })}
-                      className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${
-                        formData.category === c 
-                          ? 'bg-[#064E3B] text-[#10B981] border-[#10B981]' 
-                          : 'bg-[#262626] text-gray-400 border-transparent hover:bg-[#333333]'
-                      }`}
-                    >
-                      {c}
-                    </button>
-                  ))}
+              {/* Bloco 2: Classificação e Pagamento */}
+              <div className="bg-[#171717] p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-2xl">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-8 h-8 rounded-full bg-blue-900/30 flex items-center justify-center">
+                    <Tag className="w-4 h-4 text-blue-400" />
+                  </div>
+                  <h3 className="text-lg font-bold text-white">Classificação & Pagamento</h3>
                 </div>
-              </div>
 
-              {/* Debtor Card (Conditional) */}
-              {(formData.costCenter === 'Compartilhado' || formData.costCenter === 'Individual') && (
-                <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                  <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">
-                    {formData.costCenter === 'Compartilhado' ? 'Dividir com (Mccley já incluso)' : 'Atribuir a'}
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {PEOPLE.filter(p => formData.costCenter === 'Compartilhado' ? p !== 'Mccley' : true).map(p => (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => {
-                          if (formData.costCenter === 'Individual') {
-                            setFormData({ ...formData, individualPerson: p });
-                          } else {
-                            togglePersonInSplit(p);
-                          }
-                        }}
-                        className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${
-                          (formData.individualPerson === p || formData.splitWith?.includes(p))
-                            ? 'bg-[#064E3B] text-[#10B981] border-[#10B981]' 
-                            : 'bg-[#262626] text-gray-400 border-transparent'
-                        }`}
+                <div className="space-y-6">
+                  {/* Category Card */}
+                  <div className="space-y-2">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Categoria</p>
+                    <div className="flex flex-wrap gap-2">
+                      {CATEGORIES.map(c => (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setFormData({ ...formData, category: c })}
+                          className={`px-4 py-2 rounded-lg text-xs font-bold transition-all border ${
+                            formData.category === c 
+                              ? 'bg-blue-900/40 text-blue-400 border-blue-500/50 shadow-lg shadow-blue-900/20' 
+                              : 'bg-[#262626]/50 text-gray-400 border-transparent hover:bg-[#333333]'
+                          }`}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Payment Method */}
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Método de Pagamento</p>
+                      <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
+                        {CARDS.map(card => (
+                          <button
+                            key={card}
+                            type="button"
+                            onClick={() => setFormData({ ...formData, card })}
+                            className={`flex-shrink-0 flex-1 p-4 rounded-2xl border transition-all space-y-4 text-left min-w-[100px] ${
+                              formData.card === card 
+                                ? 'bg-[#064E3B]/20 border-[#10B981] text-[#10B981] shadow-lg shadow-emerald-900/10' 
+                                : 'bg-[#262626]/50 border-transparent text-gray-500'
+                            }`}
+                          >
+                            <p className="text-[10px] font-bold uppercase">{card}</p>
+                            <CreditCard className="w-6 h-6" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    {/* Installments */}
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Parcelamento</p>
+                      <select 
+                        className="w-full h-[88px] bg-[#262626]/50 border border-white/5 focus:border-[#10B981]/50 rounded-2xl p-4 text-gray-300 outline-none appearance-none transition-colors text-lg"
+                        value={formData.installments}
+                        onChange={(e) => setFormData({ ...formData, installments: e.target.value })}
                       >
-                        {p}
-                      </button>
-                    ))}
+                        <option value="À vista">À vista</option>
+                        {[...Array(12)].map((_, i) => (
+                          <option key={i} value={`${i + 1}x`}>{i + 1}x</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 </div>
-              )}
-
-              {/* Date Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Vencimento</p>
-                <div className="relative">
-                  <input 
-                    type="date" 
-                    className="w-full bg-[#262626] border-none rounded-xl p-4 text-gray-300 outline-none"
-                    value={formData.dueDate}
-                    onChange={(e) => setFormData({ ...formData, dueDate: e.target.value })}
-                    required
-                  />
-                </div>
               </div>
 
-              {/* Description Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Descrição</p>
-                <div className="relative">
-                  <Tag className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-600" />
-                  <input 
-                    type="text" 
-                    placeholder="O que você comprou?"
-                    className="w-full bg-[#262626] border-none rounded-xl p-4 pl-12 text-gray-300 outline-none placeholder:text-gray-600"
-                    value={formData.description}
-                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                    required
-                  />
+              {/* Bloco 3: Rateio e Repetição */}
+              <div className="bg-[#171717] p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-2xl">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-8 h-8 rounded-full bg-purple-900/30 flex items-center justify-center">
+                    <Users className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <h3 className="text-lg font-bold text-white">Rateio & Repetição</h3>
                 </div>
-              </div>
 
-              {/* Payment Method Card */}
-              <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-4">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Método de Pagamento</p>
-                <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-hide">
-                  {CARDS.map(card => (
-                    <button
-                      key={card}
-                      type="button"
-                      onClick={() => setFormData({ ...formData, card })}
-                      className={`flex-shrink-0 w-40 p-4 rounded-2xl border transition-all space-y-4 text-left ${
-                        formData.card === card 
-                          ? 'bg-[#064E3B]/20 border-[#10B981] text-[#10B981]' 
-                          : 'bg-[#262626] border-transparent text-gray-500'
-                      }`}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Cost Center Card */}
+                  <div className="space-y-2">
+                    <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">Centro de Custo</p>
+                    <select 
+                      className="w-full bg-[#262626]/50 border border-white/5 focus:border-[#10B981]/50 rounded-xl p-4 text-gray-300 outline-none appearance-none transition-colors"
+                      value={formData.costCenter}
+                      onChange={(e) => setFormData({ ...formData, costCenter: e.target.value as CostCenter })}
                     >
-                      <p className="text-[10px] font-bold uppercase">{card}</p>
-                      <CreditCard className="w-6 h-6" />
-                    </button>
-                  ))}
+                      {COST_CENTERS.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+
+                  {/* Debtor Card (Conditional) */}
+                  {(formData.costCenter === 'Compartilhado' || formData.costCenter === 'Individual') ? (
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold text-gray-500">
+                        {formData.costCenter === 'Compartilhado' ? 'Dividir com (Mccley já incluso)' : 'Atribuir a'}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {PEOPLE.filter(p => formData.costCenter === 'Compartilhado' ? p !== 'Mccley' : true).map(p => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => {
+                              if (formData.costCenter === 'Individual') {
+                                setFormData({ ...formData, individualPerson: p });
+                              } else {
+                                togglePersonInSplit(p);
+                              }
+                            }}
+                            className={`px-4 py-3 rounded-xl text-xs font-bold transition-all border ${
+                              (formData.individualPerson === p || formData.splitWith?.includes(p))
+                                ? 'bg-[#064E3B] text-[#10B981] border-[#10B981] shadow-lg shadow-emerald-900/20' 
+                                : 'bg-[#262626]/50 text-gray-400 border-transparent hover:bg-[#333333]'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2 flex items-center justify-center bg-[#262626]/20 rounded-xl p-4 border border-white/5 border-dashed">
+                       <p className="text-xs text-gray-500 text-center">Rateio automático aplicado:<br/> {formData.costCenter}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="border-t border-white/5 pt-6 mt-6">
+                  {/* Recurring Toggle */}
+                  <div className="flex items-center justify-between bg-[#262626]/30 p-5 rounded-2xl border border-white/5">
+                    <div className="flex items-center gap-4">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center transition-colors ${formData.isRecurring ? 'bg-emerald-900/30' : 'bg-[#333]'}`}>
+                        <RefreshCw className={`w-6 h-6 ${formData.isRecurring ? 'text-[#10B981]' : 'text-gray-600'}`} />
+                      </div>
+                      <div>
+                        <p className="text-base font-bold text-white">Despesa Recorrente</p>
+                        <p className="text-xs text-gray-500">Gerar lançamentos automáticos para os próximos meses</p>
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-4">
+                      <AnimatePresence>
+                        {formData.isRecurring && (
+                          <motion.div 
+                            initial={{ opacity: 0, width: 0 }} 
+                            animate={{ opacity: 1, width: 'auto' }} 
+                            exit={{ opacity: 0, width: 0 }}
+                            className="flex items-center gap-2"
+                          >
+                            <span className="text-[10px] uppercase font-bold text-gray-500">Repetir</span>
+                            <input 
+                              type="number" 
+                              min="2"
+                              max="120"
+                              className="w-16 bg-[#171717] border border-white/10 rounded-lg p-2 text-center text-white outline-none focus:border-[#10B981]"
+                              value={formData.recurringCount || 2}
+                              onChange={(e) => setFormData({ ...formData, recurringCount: parseInt(e.target.value) || 2 })}
+                            />
+                            <span className="text-[10px] uppercase font-bold text-gray-500">Vezes</span>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+
+                      <button 
+                        type="button"
+                        onClick={() => setFormData({ ...formData, isRecurring: !formData.isRecurring })}
+                        className={`w-14 h-7 rounded-full transition-colors relative shadow-inner ${formData.isRecurring ? 'bg-[#10B981]' : 'bg-gray-800'}`}
+                      >
+                        <div className={`absolute top-1 w-5 h-5 bg-white rounded-full transition-transform shadow-md ${formData.isRecurring ? 'left-8' : 'left-1'}`} />
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
               {/* Submit Button */}
               <button 
                 type="submit"
-                className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] text-black py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20 active:scale-95 transition-transform"
+                className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] hover:from-[#34D399] hover:to-[#10B981] text-black py-6 rounded-2xl font-bold text-xl flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/20 active:scale-[0.98] transition-all"
               >
-                {editingId ? 'Salvar Alterações' : 'Confirmar Transação'} <ArrowRight className="w-5 h-5" />
+                {editingId ? 'Salvar Alterações' : 'Confirmar Transação'} <ArrowRight className="w-6 h-6" />
               </button>
             </form>
           </div>
@@ -1274,9 +1429,23 @@ export default function McFinanceApp() {
           </div>
         ) : activeTab === 'receita' ? (
           <div className="space-y-8">
-            <div className="space-y-2">
-              <h2 className="text-4xl font-bold">Lançar Receita</h2>
-              <p className="text-gray-500 text-sm">Gerencie sua receita mensal e acompanhe as métricas.</p>
+            <div className="flex justify-between items-start">
+              <div className="space-y-2">
+                <h2 className="text-4xl font-bold">Lançar Receita</h2>
+                <p className="text-gray-500 text-sm">Gerencie sua receita mensal e acompanhe as métricas.</p>
+              </div>
+              <div className="flex gap-2">
+                <button 
+                  onClick={downloadRevenueCSVTemplate}
+                  className="flex items-center gap-2 bg-[#262626] hover:bg-[#333] text-gray-300 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors shadow-lg"
+                >
+                  <Download className="w-4 h-4" /> Baixar Modelo CSV
+                </button>
+                <label className="flex items-center gap-2 bg-[#10B981]/20 hover:bg-[#10B981]/30 text-[#10B981] px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer border border-[#10B981]/30 shadow-lg">
+                  <Upload className="w-4 h-4" /> Upload CSV
+                  <input type="file" accept=".csv" className="hidden" onChange={handleRevenueCSVUpload} />
+                </label>
+              </div>
             </div>
 
             {/* Dashboard Média dos últimos 12 meses */}
