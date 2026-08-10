@@ -815,36 +815,38 @@ export default function McFinanceApp() {
       const originalExpense = expenses.find(exp => exp.id === editingId);
       if (originalExpense && applyToFuture) {
         const originalGroupId = getGroupId(originalExpense);
-        const updatedExpenses = expenses.map(exp => {
-          if (exp.id === editingId) {
-            return { ...exp, ...formData as Expense };
-          } else {
-            const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
-                                 (getGroupId(exp) === originalGroupId);
+        const groupItems = expenses.filter(exp => 
+          (originalExpense.groupId && exp.groupId === originalExpense.groupId) || (getGroupId(exp) === originalGroupId)
+        ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
-            if (matchesGroup && exp.dueDate >= originalExpense.dueDate) {
-              return {
-                ...exp,
-                costCenter: formData.costCenter as CostCenter,
-                splitWith: formData.splitWith,
-                individualPerson: formData.individualPerson,
-                description: formData.description || exp.description,
-                value: formData.value || exp.value,
-                category: formData.category as Category,
-                card: formData.card as Card,
-              };
-            }
+        const baseDesc = (formData.description || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+        const totalItems = groupItems.length;
+
+        const updatedExpensesMap = new Map<string, Expense>();
+
+        groupItems.forEach((exp, index) => {
+          let updatedDesc = formData.description;
+          if (totalItems > 1 && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(exp.description)) {
+            const match = exp.description.match(/\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
+            const k = match ? match[1] : (index + 1);
+            const n = match ? match[2] : totalItems;
+            updatedDesc = `${baseDesc} (${k}/${n})`;
           }
-          return exp;
+
+          updatedExpensesMap.set(exp.id, {
+            ...exp,
+            costCenter: formData.costCenter as CostCenter,
+            splitWith: formData.splitWith,
+            individualPerson: formData.individualPerson,
+            description: updatedDesc || exp.description,
+            value: formData.value || exp.value,
+            category: formData.category as Category,
+            card: formData.card as Card,
+          });
         });
 
-        itemsToSave = updatedExpenses.filter(exp => {
-          if (exp.id === editingId) return true;
-          const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
-                               (getGroupId(exp) === originalGroupId);
-          return matchesGroup && exp.dueDate >= originalExpense.dueDate;
-        });
-
+        const updatedExpenses = expenses.map(exp => updatedExpensesMap.get(exp.id) || exp);
+        itemsToSave = Array.from(updatedExpensesMap.values());
         setExpenses(updatedExpenses);
       } else {
         const updated = { ...expenses.find(exp => exp.id === editingId)!, ...formData as Expense };
@@ -901,8 +903,15 @@ export default function McFinanceApp() {
   };
 
   const handleEdit = (expense: Expense) => {
-    setFormData(expense);
-    setEditingId(expense.id);
+    const targetGroupId = getGroupId(expense);
+    const groupExpenses = expenses.filter(exp => 
+      (expense.groupId && exp.groupId === expense.groupId) || (getGroupId(exp) === targetGroupId)
+    ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+    const rootExpense = groupExpenses.length > 0 ? groupExpenses[0] : expense;
+
+    setFormData(rootExpense);
+    setEditingId(rootExpense.id);
     setApplyToFuture(false);
     setActiveTab('expenses');
   };
@@ -1536,7 +1545,7 @@ export default function McFinanceApp() {
                       className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer shrink-0"
                     />
                     <label htmlFor="applyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer">
-                      Aplicar alterações a esta e a todas as parcelas/lançamentos futuros em aberto.
+                      Aplicar alterações a todas as parcelas/lançamentos deste item.
                     </label>
                   </div>
                 );
