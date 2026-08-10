@@ -153,22 +153,32 @@ export default function McFinanceApp() {
         if (expError || revError) throw expError || revError;
 
         if (expData) {
-          const formattedExpenses = expData.map(e => ({
-            id: e.id,
-            dueDate: e.due_date,
-            costCenter: e.cost_center,
-            installments: e.installments === 1 ? 'À vista' : `${e.installments}x`,
-            splitWith: e.split_with,
-            individualPerson: e.individual_person,
-            description: e.description,
-            value: e.value,
-            category: e.category,
-            card: e.card,
-            createdAt: new Date(e.created_at).getTime(),
-            receivedFrom: e.received_from || [],
-            isRecurring: e.is_recurring,
-            groupId: e.group_id
-          }));
+          const seenKeys = new Set<string>();
+          const formattedExpenses: Expense[] = [];
+
+          expData.forEach(e => {
+            const key = `${(e.description || '').trim().toLowerCase()}|${e.due_date}|${e.value}|${e.cost_center}`;
+            if (!seenKeys.has(key)) {
+              seenKeys.add(key);
+              formattedExpenses.push({
+                id: e.id,
+                dueDate: e.due_date,
+                costCenter: e.cost_center,
+                installments: e.installments === 1 ? 'À vista' : `${e.installments}x`,
+                splitWith: e.split_with,
+                individualPerson: e.individual_person,
+                description: e.description,
+                value: e.value,
+                category: e.category,
+                card: e.card,
+                createdAt: new Date(e.created_at).getTime(),
+                receivedFrom: e.received_from || [],
+                isRecurring: e.is_recurring,
+                groupId: e.group_id
+              });
+            }
+          });
+
           setExpenses(formattedExpenses);
         }
 
