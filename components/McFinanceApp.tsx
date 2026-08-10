@@ -843,36 +843,47 @@ export default function McFinanceApp() {
                                    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
         const rootExp = groupItems[0] || originalExpense;
+        const groupId = rootExp.groupId || originalExpense.groupId || Math.random().toString(36).substr(2, 9);
         const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || rootExp.dueDate);
         const rawBaseDesc = (formData.description || rootExp.description).replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
-        const totalItems = groupItems.length;
 
-        const updatedExpensesMap = new Map<string, Expense>();
+        let newCount = groupItems.length;
+        if (formData.installments && formData.installments !== 'À vista') {
+          const parsed = parseInt(String(formData.installments).replace(/\D/g, ''), 10);
+          if (!isNaN(parsed) && parsed > 0) newCount = parsed;
+        } else if (formData.isRecurring && formData.recurringCount) {
+          newCount = formData.recurringCount;
+        } else if (formData.installments === 'À vista') {
+          newCount = 1;
+        }
 
-        groupItems.forEach((exp, index) => {
-          let updatedDesc = formData.description || exp.description;
-          if (totalItems > 1 && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(exp.description)) {
-            const match = exp.description.match(/\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
-            const k = match ? match[1] : (index + 1);
-            const n = match ? match[2] : totalItems;
-            updatedDesc = `${rawBaseDesc} (${k}/${n})`;
+        const itemsToKeepAndUpdate: Expense[] = [];
+        const itemsToCreate: Expense[] = [];
+        const idsToDeleteFromDB: string[] = [];
+
+        const updateLimit = Math.min(groupItems.length, newCount);
+        for (let index = 0; index < updateLimit; index++) {
+          const exp = groupItems[index];
+          let updatedDesc = rawBaseDesc;
+          if (newCount > 1) {
+            updatedDesc = `${rawBaseDesc} (${index + 1}/${newCount})`;
           }
 
-          let updatedDueDate = exp.dueDate;
-          if (formData.dueDate) {
-            let m = baseMonth + index;
-            let y = baseYear + Math.floor(m / 12);
-            m = m % 12;
-            const daysInMonth = new Date(y, m + 1, 0).getDate();
-            const actualDay = Math.min(baseDay, daysInMonth);
-            const formattedMonth = String(m + 1).padStart(2, '0');
-            const formattedDay = String(actualDay).padStart(2, '0');
-            updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
-          }
+          let m = baseMonth + index;
+          let y = baseYear + Math.floor(m / 12);
+          m = m % 12;
+          const daysInMonth = new Date(y, m + 1, 0).getDate();
+          const actualDay = Math.min(baseDay, daysInMonth);
+          const formattedMonth = String(m + 1).padStart(2, '0');
+          const formattedDay = String(actualDay).padStart(2, '0');
+          const updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
 
-          updatedExpensesMap.set(exp.id, {
+          itemsToKeepAndUpdate.push({
             ...exp,
+            groupId,
             dueDate: updatedDueDate,
+            installments: newCount === 1 ? 'À vista' : `${newCount}x`,
+            isRecurring: Boolean(formData.isRecurring),
             costCenter: formData.costCenter as CostCenter,
             splitWith: formData.splitWith,
             individualPerson: formData.individualPerson,
@@ -881,11 +892,59 @@ export default function McFinanceApp() {
             category: formData.category as Category,
             card: formData.card as Card,
           });
-        });
+        }
 
-        const updatedExpenses = expenses.map(exp => updatedExpensesMap.get(exp.id) || exp);
-        itemsToSave = Array.from(updatedExpensesMap.values());
-        setExpenses(updatedExpenses);
+        if (newCount < groupItems.length) {
+          for (let index = newCount; index < groupItems.length; index++) {
+            idsToDeleteFromDB.push(groupItems[index].id);
+          }
+        }
+
+        if (newCount > groupItems.length) {
+          for (let index = groupItems.length; index < newCount; index++) {
+            let updatedDesc = `${rawBaseDesc} (${index + 1}/${newCount})`;
+            let m = baseMonth + index;
+            let y = baseYear + Math.floor(m / 12);
+            m = m % 12;
+            const daysInMonth = new Date(y, m + 1, 0).getDate();
+            const actualDay = Math.min(baseDay, daysInMonth);
+            const formattedMonth = String(m + 1).padStart(2, '0');
+            const formattedDay = String(actualDay).padStart(2, '0');
+            const updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
+
+            itemsToCreate.push({
+              ...formData as Expense,
+              id: Math.random().toString(36).substr(2, 9),
+              groupId,
+              dueDate: updatedDueDate,
+              installments: `${newCount}x`,
+              isRecurring: Boolean(formData.isRecurring),
+              costCenter: formData.costCenter as CostCenter,
+              splitWith: formData.splitWith,
+              individualPerson: formData.individualPerson,
+              description: updatedDesc,
+              value: formData.value || rootExp.value,
+              category: formData.category as Category,
+              card: formData.card as Card,
+              createdAt: Date.now()
+            });
+          }
+        }
+
+        const updatedMap = new Map<string, Expense>();
+        itemsToKeepAndUpdate.forEach(e => updatedMap.set(e.id, e));
+
+        const finalExpenses = [
+          ...itemsToCreate,
+          ...expenses.filter(e => !idsToDeleteFromDB.includes(e.id)).map(e => updatedMap.get(e.id) || e)
+        ];
+
+        setExpenses(finalExpenses);
+
+        itemsToSave = [...itemsToKeepAndUpdate, ...itemsToCreate];
+        if (idsToDeleteFromDB.length > 0) {
+          deleteExpensesFromSupabase(idsToDeleteFromDB);
+        }
       } else {
         const updated = { ...expenses.find(exp => exp.id === editingId)!, ...formData as Expense };
         itemsToSave = [updated];
