@@ -118,6 +118,31 @@ const getGroupId = (exp: Expense) => {
   return `retro-${baseDesc}-${exp.value}-${exp.costCenter}`;
 };
 
+const getBaseDescription = (desc: string) => {
+  return (desc || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim().toLowerCase();
+};
+
+const getDenominator = (desc: string) => {
+  const match = (desc || '').match(/\(\s*\d+\s*\/\s*(\d+)\s*\)/);
+  return match ? match[1] : null;
+};
+
+const isSameSeries = (e1: Expense, e2: Expense) => {
+  if (e1.id === e2.id) return true;
+  if (e1.groupId && e2.groupId && e1.groupId === e2.groupId) return true;
+
+  const base1 = getBaseDescription(e1.description);
+  const base2 = getBaseDescription(e2.description);
+  
+  if (base1 && base1 === base2 && e1.costCenter === e2.costCenter) {
+    const d1 = getDenominator(e1.description);
+    const d2 = getDenominator(e2.description);
+    if (d1 && d2 && d1 === d2) return true;
+    if (!d1 && !d2) return true;
+  }
+  return false;
+};
+
 const getExpensePersonShare = (exp: Expense, personFilter: string): number => {
   if (personFilter === 'Todos') return exp.value;
   const targetPerson = personFilter as Person;
@@ -814,24 +839,23 @@ export default function McFinanceApp() {
     if (editingId) {
       const originalExpense = expenses.find(exp => exp.id === editingId);
       if (originalExpense && applyToFuture) {
-        const originalGroupId = getGroupId(originalExpense);
-        const groupItems = expenses.filter(exp => 
-          (originalExpense.groupId && exp.groupId === originalExpense.groupId) || (getGroupId(exp) === originalGroupId)
-        ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+        const groupItems = expenses.filter(exp => isSameSeries(exp, originalExpense))
+                                   .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
-        const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || originalExpense.dueDate);
-        const baseDesc = (formData.description || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+        const rootExp = groupItems[0] || originalExpense;
+        const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || rootExp.dueDate);
+        const rawBaseDesc = (formData.description || rootExp.description).replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
         const totalItems = groupItems.length;
 
         const updatedExpensesMap = new Map<string, Expense>();
 
         groupItems.forEach((exp, index) => {
-          let updatedDesc = formData.description;
+          let updatedDesc = formData.description || exp.description;
           if (totalItems > 1 && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(exp.description)) {
             const match = exp.description.match(/\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
             const k = match ? match[1] : (index + 1);
             const n = match ? match[2] : totalItems;
-            updatedDesc = `${baseDesc} (${k}/${n})`;
+            updatedDesc = `${rawBaseDesc} (${k}/${n})`;
           }
 
           let updatedDueDate = exp.dueDate;
@@ -852,7 +876,7 @@ export default function McFinanceApp() {
             costCenter: formData.costCenter as CostCenter,
             splitWith: formData.splitWith,
             individualPerson: formData.individualPerson,
-            description: updatedDesc || exp.description,
+            description: updatedDesc,
             value: formData.value || exp.value,
             category: formData.category as Category,
             card: formData.card as Card,
@@ -917,12 +941,10 @@ export default function McFinanceApp() {
   };
 
   const handleEdit = (expense: Expense) => {
-    const targetGroupId = getGroupId(expense);
-    const groupExpenses = expenses.filter(exp => 
-      (expense.groupId && exp.groupId === expense.groupId) || (getGroupId(exp) === targetGroupId)
-    ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+    const seriesExpenses = expenses.filter(exp => isSameSeries(exp, expense))
+                                    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
-    const rootExpense = groupExpenses.length > 0 ? groupExpenses[0] : expense;
+    const rootExpense = seriesExpenses.length > 0 ? seriesExpenses[0] : expense;
 
     setFormData(rootExpense);
     setEditingId(rootExpense.id);
@@ -937,16 +959,7 @@ export default function McFinanceApp() {
     let idsToDelete: string[] = [id];
 
     if (applyToFuture) {
-      const originalGroupId = getGroupId(originalExpense);
-      idsToDelete = expenses.filter(exp => {
-        if (exp.id === id) return true;
-        
-        const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
-                             (getGroupId(exp) === originalGroupId);
-
-        if (matchesGroup && exp.dueDate >= originalExpense.dueDate) return true;
-        return false;
-      }).map(exp => exp.id);
+      idsToDelete = expenses.filter(exp => isSameSeries(exp, originalExpense)).map(exp => exp.id);
     }
 
     setExpenses(expenses.filter(exp => !idsToDelete.includes(exp.id)));
@@ -1532,19 +1545,14 @@ export default function McFinanceApp() {
                 const editingExp = editingId ? expenses.find(e => e.id === editingId) : null;
                 if (!editingExp) return null;
 
-                const targetGroupId = getGroupId(editingExp);
-                const hasMatchingFutureItems = expenses.some(e => {
-                  if (e.id === editingExp.id) return false;
-                  const matchesGroup = (editingExp.groupId && e.groupId === editingExp.groupId) || (getGroupId(e) === targetGroupId);
-                  return matchesGroup && e.dueDate >= editingExp.dueDate;
-                });
+                const seriesExpenses = expenses.filter(e => isSameSeries(e, editingExp));
 
                 const isGroupOrParcel = Boolean(
                   editingExp.groupId ||
                   editingExp.isRecurring ||
                   (editingExp.installments && editingExp.installments !== 'À vista' && editingExp.installments !== '1x') ||
                   /\(\s*\d+\s*\/\s*\d+\s*\)/.test(editingExp.description) ||
-                  hasMatchingFutureItems
+                  seriesExpenses.length > 1
                 );
 
                 if (!isGroupOrParcel) return null;
@@ -2401,19 +2409,14 @@ export default function McFinanceApp() {
                 const targetExp = showDeleteConfirm ? expenses.find(e => e.id === showDeleteConfirm) : null;
                 if (!targetExp) return null;
 
-                const targetGroupId = getGroupId(targetExp);
-                const hasMatchingFutureItems = expenses.some(e => {
-                  if (e.id === targetExp.id) return false;
-                  const matchesGroup = (targetExp.groupId && e.groupId === targetExp.groupId) || (getGroupId(e) === targetGroupId);
-                  return matchesGroup && e.dueDate >= targetExp.dueDate;
-                });
+                const seriesExpenses = expenses.filter(e => isSameSeries(e, targetExp));
 
                 const isGroupOrParcel = Boolean(
                   targetExp.groupId ||
                   targetExp.isRecurring ||
                   (targetExp.installments && targetExp.installments !== 'À vista' && targetExp.installments !== '1x') ||
                   /\(\s*\d+\s*\/\s*\d+\s*\)/.test(targetExp.description) ||
-                  hasMatchingFutureItems
+                  seriesExpenses.length > 1
                 );
 
                 if (!isGroupOrParcel) return null;
@@ -2428,7 +2431,7 @@ export default function McFinanceApp() {
                       className="w-5 h-5 mt-0.5 rounded border-gray-700 bg-transparent text-red-500 focus:ring-red-500 cursor-pointer"
                     />
                     <label htmlFor="deleteApplyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer leading-tight">
-                      Excluir também todas as parcelas/lançamentos futuros associados a este item.
+                      Excluir também todas as parcelas/lançamentos associados a este item.
                     </label>
                   </div>
                 );
