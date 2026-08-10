@@ -819,6 +819,7 @@ export default function McFinanceApp() {
           (originalExpense.groupId && exp.groupId === originalExpense.groupId) || (getGroupId(exp) === originalGroupId)
         ).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
+        const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || originalExpense.dueDate);
         const baseDesc = (formData.description || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
         const totalItems = groupItems.length;
 
@@ -833,8 +834,21 @@ export default function McFinanceApp() {
             updatedDesc = `${baseDesc} (${k}/${n})`;
           }
 
+          let updatedDueDate = exp.dueDate;
+          if (formData.dueDate) {
+            let m = baseMonth + index;
+            let y = baseYear + Math.floor(m / 12);
+            m = m % 12;
+            const daysInMonth = new Date(y, m + 1, 0).getDate();
+            const actualDay = Math.min(baseDay, daysInMonth);
+            const formattedMonth = String(m + 1).padStart(2, '0');
+            const formattedDay = String(actualDay).padStart(2, '0');
+            updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
+          }
+
           updatedExpensesMap.set(exp.id, {
             ...exp,
+            dueDate: updatedDueDate,
             costCenter: formData.costCenter as CostCenter,
             splitWith: formData.splitWith,
             individualPerson: formData.individualPerson,
