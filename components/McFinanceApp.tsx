@@ -790,26 +790,27 @@ export default function McFinanceApp() {
     doc.text(`Quantidade de Lançamentos: ${totals.filteredExpenses.length}`, 14, 40);
 
     // Table
-    const tableColumn = ['Descrição', 'Vencimento', 'Centro de Custo', 'Valor (R$)', 'Categoria', 'Cartão'];
+    const tableColumn = ['Descrição', 'Vencimento', 'Vlr da Despesa', 'Centro de Custo', 'Valor (R$)'];
+    let totalRawValue = 0;
+
     const tableRows = totals.filteredExpenses.map(exp => {
       const share = getExpensePersonShare(exp, reportFilters.person);
+      totalRawValue += exp.value;
       return [
         exp.description,
         formatDateBR(exp.dueDate),
+        exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
         exp.costCenter,
-        share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        exp.category,
-        exp.card
+        share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       ];
     });
 
     tableRows.push([
       'TOTAL',
       '',
+      totalRawValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
       '',
-      totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2 }),
-      '',
-      ''
+      totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     ]);
 
     autoTable(doc, {
