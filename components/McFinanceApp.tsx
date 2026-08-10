@@ -813,28 +813,37 @@ export default function McFinanceApp() {
 
     if (editingId) {
       const originalExpense = expenses.find(exp => exp.id === editingId);
-      if (applyToFuture && originalExpense && originalExpense.groupId) {
+      if (originalExpense && applyToFuture) {
+        const originalGroupId = getGroupId(originalExpense);
         const updatedExpenses = expenses.map(exp => {
           if (exp.id === editingId) {
             return { ...exp, ...formData as Expense };
-          } else if (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate) {
-            return {
-              ...exp,
-              costCenter: formData.costCenter as CostCenter,
-              splitWith: formData.splitWith,
-              individualPerson: formData.individualPerson,
-              description: formData.description || exp.description,
-              value: formData.value || exp.value,
-              category: formData.category as Category,
-              card: formData.card as Card,
-            };
+          } else {
+            const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
+                                 (getGroupId(exp) === originalGroupId);
+
+            if (matchesGroup && exp.dueDate >= originalExpense.dueDate) {
+              return {
+                ...exp,
+                costCenter: formData.costCenter as CostCenter,
+                splitWith: formData.splitWith,
+                individualPerson: formData.individualPerson,
+                description: formData.description || exp.description,
+                value: formData.value || exp.value,
+                category: formData.category as Category,
+                card: formData.card as Card,
+              };
+            }
           }
           return exp;
         });
 
-        itemsToSave = updatedExpenses.filter(exp => 
-          exp.id === editingId || (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate)
-        );
+        itemsToSave = updatedExpenses.filter(exp => {
+          if (exp.id === editingId) return true;
+          const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
+                               (getGroupId(exp) === originalGroupId);
+          return matchesGroup && exp.dueDate >= originalExpense.dueDate;
+        });
 
         setExpenses(updatedExpenses);
       } else {
@@ -1496,20 +1505,42 @@ export default function McFinanceApp() {
               </div>
 
               {/* Submit Button */}
-              {editingId && expenses.find(e => e.id === editingId)?.groupId && (
-                <div className="flex items-center gap-3 p-4 bg-[#262626]/50 rounded-2xl border border-white/5 mb-4">
-                  <input 
-                    type="checkbox" 
-                    id="applyToFuture"
-                    checked={applyToFuture}
-                    onChange={(e) => setApplyToFuture(e.target.checked)}
-                    className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
-                  />
-                  <label htmlFor="applyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer">
-                    Aplicar alterações a esta e a todas as parcelas futuras deste lançamento.
-                  </label>
-                </div>
-              )}
+              {(() => {
+                const editingExp = editingId ? expenses.find(e => e.id === editingId) : null;
+                if (!editingExp) return null;
+
+                const targetGroupId = getGroupId(editingExp);
+                const hasMatchingFutureItems = expenses.some(e => {
+                  if (e.id === editingExp.id) return false;
+                  const matchesGroup = (editingExp.groupId && e.groupId === editingExp.groupId) || (getGroupId(e) === targetGroupId);
+                  return matchesGroup && e.dueDate >= editingExp.dueDate;
+                });
+
+                const isGroupOrParcel = Boolean(
+                  editingExp.groupId ||
+                  editingExp.isRecurring ||
+                  (editingExp.installments && editingExp.installments !== 'À vista' && editingExp.installments !== '1x') ||
+                  /\(\s*\d+\s*\/\s*\d+\s*\)/.test(editingExp.description) ||
+                  hasMatchingFutureItems
+                );
+
+                if (!isGroupOrParcel) return null;
+
+                return (
+                  <div className="flex items-center gap-3 p-4 bg-[#262626]/50 rounded-2xl border border-white/5 mb-4">
+                    <input 
+                      type="checkbox" 
+                      id="applyToFuture"
+                      checked={applyToFuture}
+                      onChange={(e) => setApplyToFuture(e.target.checked)}
+                      className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer shrink-0"
+                    />
+                    <label htmlFor="applyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer">
+                      Aplicar alterações a esta e a todas as parcelas/lançamentos futuros em aberto.
+                    </label>
+                  </div>
+                );
+              })()}
               <button 
                 type="submit"
                 className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] hover:from-[#34D399] hover:to-[#10B981] text-black py-6 rounded-2xl font-bold text-xl flex items-center justify-center gap-3 shadow-xl shadow-emerald-900/20 active:scale-[0.98] transition-all"
