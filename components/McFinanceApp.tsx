@@ -100,8 +100,10 @@ export default function McFinanceApp() {
   const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
   const [showForm, setShowForm] = useState(false);
   const [syncStatus, setSyncStatus] = useState<'synced' | 'local' | 'error'>('local');
+  const [syncErrorMsg, setSyncErrorMsg] = useState<string | null>(null);
   const [expandedPerson, setExpandedPerson] = useState<string | null>(null);
   const isInitialLoad = useRef(true);
+  const isDataLoaded = useRef(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
   // Supabase Sync Logic
@@ -127,15 +129,15 @@ export default function McFinanceApp() {
             id: e.id,
             dueDate: e.due_date,
             costCenter: e.cost_center,
-            installments: e.installments,
+            installments: e.installments === 1 ? 'À vista' : `${e.installments}x`,
             splitWith: e.split_with,
             individualPerson: e.individual_person,
             description: e.description,
             value: e.value,
             category: e.category,
             card: e.card,
-            createdAt: e.created_at,
-            receivedFrom: e.received_from,
+            createdAt: new Date(e.created_at).getTime(),
+            receivedFrom: e.received_from || [],
             isRecurring: e.is_recurring,
             groupId: e.group_id
           }));
@@ -163,10 +165,13 @@ export default function McFinanceApp() {
           setLoans(loanData);
         }
 
+        isDataLoaded.current = true;
         setSyncStatus('synced');
-      } catch (error) {
+        setSyncErrorMsg(null);
+      } catch (error: any) {
         console.error('Supabase fetch error:', error);
         setSyncStatus('error');
+        setSyncErrorMsg(error?.message || JSON.stringify(error));
       } finally {
         setIsSyncing(false);
         isInitialLoad.current = false;
@@ -176,96 +181,149 @@ export default function McFinanceApp() {
     fetchData();
   }, []);
 
-  // Sync expenses to Supabase
-  useEffect(() => {
-    if (isInitialLoad.current || syncStatus === 'local') return;
+  // Targeted Helper Functions for Supabase Sync
+  const saveExpensesToSupabase = async (expensesToSave: Expense[]) => {
+    try {
+      setIsSyncing(true);
+      const rows = expensesToSave.map(e => {
+        let inst = parseInt(String(e.installments).replace(/\D/g, ''), 10);
+        if (isNaN(inst) || inst < 1) inst = 1;
 
-    const syncExpenses = async () => {
-      try {
-        const formattedExpenses = expenses.map(e => ({
+        return {
           id: e.id,
           due_date: e.dueDate,
           cost_center: e.costCenter,
-          installments: e.installments,
-          split_with: e.splitWith,
-          individual_person: e.individualPerson,
+          installments: inst,
+          split_with: e.splitWith || [],
+          individual_person: e.individualPerson || null,
           description: e.description,
-          value: e.value,
+          value: Number(e.value) || 0,
           category: e.category,
           card: e.card,
-          created_at: e.createdAt,
-          received_from: e.receivedFrom,
-          is_recurring: e.isRecurring,
-          group_id: e.groupId
-        }));
+          created_at: e.createdAt ? new Date(e.createdAt).toISOString() : new Date().toISOString(),
+          received_from: e.receivedFrom || [],
+          is_recurring: Boolean(e.isRecurring),
+          group_id: e.groupId || null
+        };
+      });
 
-        // Simple approach: delete all and re-insert or upsert
-        // For small datasets, upsert is fine
-        const { error } = await supabase.from('expenses').upsert(formattedExpenses);
-        if (error) throw error;
-        setSyncStatus('synced');
-      } catch (error) {
-        console.error('Supabase sync error (expenses):', error);
-        setSyncStatus('error');
-      }
-    };
+      const { error } = await supabase.from('expenses').upsert(rows);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase sync error (expenses):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Expenses: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-    const timeout = setTimeout(syncExpenses, 1000);
-    return () => clearTimeout(timeout);
-  }, [expenses, syncStatus]);
+  const deleteExpensesFromSupabase = async (idsToDelete: string[]) => {
+    try {
+      setIsSyncing(true);
+      const { error } = await supabase.from('expenses').delete().in('id', idsToDelete);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase delete error (expenses):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Expenses Delete: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-  // Sync revenues to Supabase
-  useEffect(() => {
-    if (isInitialLoad.current || syncStatus === 'local') return;
+  const saveLoansToSupabase = async (loansToSave: Loan[]) => {
+    try {
+      setIsSyncing(true);
+      const { error } = await supabase.from('loans').upsert(loansToSave);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase sync error (loans):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Loans: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-    const syncRevenues = async () => {
-      try {
-        const formattedRevenues = revenues.flatMap(r => {
-          const rows = [];
-          if (r.salary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-salary`, month: r.month, year: r.year, person: 'Mccley', source: 'salary', amount: r.salary });
-          if (r.commission !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-commission`, month: r.month, year: r.year, person: 'Mccley', source: 'commission', amount: r.commission });
-          if (r.dsr !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-dsr`, month: r.month, year: r.year, person: 'Mccley', source: 'dsr', amount: r.dsr });
-          if (r.grossSalary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-grossSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'grossSalary', amount: r.grossSalary });
-          if (r.netSalary !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-netSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'netSalary', amount: r.netSalary });
-          if (r.value !== undefined) rows.push({ id: `rev-${r.month}-${r.year}-value`, month: r.month, year: r.year, person: 'Mccley', source: 'value', amount: r.value });
-          return rows;
-        });
-        const { error } = await supabase.from('revenues').upsert(formattedRevenues);
-        if (error) throw error;
-        setSyncStatus('synced');
-      } catch (error) {
-        console.error('Supabase sync error (revenues):', error);
-        setSyncStatus('error');
-      }
-    };
+  const saveRevenuesToSupabase = async (revenuesToSave: MonthlyRevenue[]) => {
+    try {
+      setIsSyncing(true);
+      const rows = revenuesToSave.flatMap(r => {
+        const result = [];
+        if (r.salary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-salary`, month: r.month, year: r.year, person: 'Mccley', source: 'salary', amount: r.salary });
+        if (r.commission !== undefined) result.push({ id: `rev-${r.month}-${r.year}-commission`, month: r.month, year: r.year, person: 'Mccley', source: 'commission', amount: r.commission });
+        if (r.dsr !== undefined) result.push({ id: `rev-${r.month}-${r.year}-dsr`, month: r.month, year: r.year, person: 'Mccley', source: 'dsr', amount: r.dsr });
+        if (r.grossSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-grossSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'grossSalary', amount: r.grossSalary });
+        if (r.netSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-netSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'netSalary', amount: r.netSalary });
+        if (r.value !== undefined) result.push({ id: `rev-${r.month}-${r.year}-value`, month: r.month, year: r.year, person: 'Mccley', source: 'value', amount: r.value });
+        return result;
+      });
+      const { error } = await supabase.from('revenues').upsert(rows);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase sync error (revenues):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Revenues: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-    const timeout = setTimeout(syncRevenues, 1000);
-    return () => clearTimeout(timeout);
-  }, [revenues, syncStatus]);
+  const deleteRevenuesFromSupabase = async (month: number, year: number) => {
+    try {
+      setIsSyncing(true);
+      const { error } = await supabase.from('revenues').delete().eq('month', month).eq('year', year);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase delete error (revenues):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Revenues Delete: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-  // Sync loans to Supabase
-  useEffect(() => {
-    if (isInitialLoad.current || syncStatus === 'local') return;
+  const deleteLoansFromSupabase = async (idsToDelete: string[]) => {
+    try {
+      setIsSyncing(true);
+      const { error } = await supabase.from('loans').delete().in('id', idsToDelete);
+      if (error) throw error;
+      setSyncStatus('synced');
+      setSyncErrorMsg(null);
+    } catch (error: any) {
+      console.error('Supabase delete error (loans):', error);
+      setSyncStatus('error');
+      setSyncErrorMsg(`Loans Delete: ${error?.message || JSON.stringify(error)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
-    const syncLoans = async () => {
-      try {
-        const { error } = await supabase.from('loans').upsert(loans);
-        if (error) throw error;
-      } catch (error) {
-        console.error('Supabase sync error (loans):', error);
-      }
-    };
-
-    const timeout = setTimeout(syncLoans, 1000);
-    return () => clearTimeout(timeout);
-  }, [loans, syncStatus]);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [applyToFuture, setApplyToFuture] = useState(false);
 
   // Filter State for Reports
-  const [reportFilters, setReportFilters] = useState({
+  const [reportFilters, setReportFilters] = useState<{
+    month: number | 'Todos';
+    year: number | 'Todos';
+    category: string;
+    costCenter: string;
+    person: string;
+    status: string;
+  }>({
     month: new Date().getMonth(),
     year: new Date().getFullYear(),
     category: 'Todas',
@@ -485,7 +543,8 @@ export default function McFinanceApp() {
     // Filtered expenses for the report
     const filteredExpenses = expenses.filter(exp => {
       const expDate = new Date(exp.dueDate);
-      const matchesMonth = expDate.getMonth() === reportFilters.month && expDate.getFullYear() === reportFilters.year;
+      const matchesMonth = (reportFilters.month === 'Todos' || expDate.getMonth() === reportFilters.month) && 
+                           (reportFilters.year === 'Todos' || expDate.getFullYear() === reportFilters.year);
       const matchesCategory = reportFilters.category === 'Todas' || exp.category === reportFilters.category;
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
       
@@ -548,7 +607,8 @@ export default function McFinanceApp() {
       return acc + share;
     }, 0);
 
-    const reportRevenue = revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.netSalary || 
+    const reportRevenue = (reportFilters.month === 'Todos' || reportFilters.year === 'Todos') ? 0 :
+                          revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.netSalary || 
                           revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.value || 0;
 
     const reportByCategory = filteredExpenses.reduce((acc, exp) => {
@@ -574,30 +634,38 @@ export default function McFinanceApp() {
 
   const handleToggleReceived = (id: string, person: Person, type: 'expense' | 'loan') => {
     if (type === 'expense') {
+      let updatedExpense: Expense | null = null;
       setExpenses(prev => prev.map(exp => {
         if (exp.id === id) {
           const receivedFrom = exp.receivedFrom || [];
-          if (receivedFrom.includes(person)) {
-            return { ...exp, receivedFrom: receivedFrom.filter(p => p !== person) };
-          } else {
-            return { ...exp, receivedFrom: [...receivedFrom, person] };
-          }
+          const newReceived = receivedFrom.includes(person)
+            ? receivedFrom.filter(p => p !== person)
+            : [...receivedFrom, person];
+          updatedExpense = { ...exp, receivedFrom: newReceived };
+          return updatedExpense;
         }
         return exp;
       }));
+      if (updatedExpense) {
+        saveExpensesToSupabase([updatedExpense]);
+      }
     } else if (type === 'loan') {
+      let updatedLoan: Loan | null = null;
       setLoans(prev => prev.map(loan => {
         if (loan.id === id) {
-          // Add a payment for the current month
           const payment = { date: new Date().toISOString(), amount: loan.monthlyValue };
-          return {
+          updatedLoan = {
             ...loan,
             installmentsPaid: loan.installmentsPaid + 1,
             paymentHistory: [...(loan.paymentHistory || []), payment]
           };
+          return updatedLoan;
         }
         return loan;
       }));
+      if (updatedLoan) {
+        saveLoansToSupabase([updatedLoan]);
+      }
     }
   };
 
@@ -614,17 +682,24 @@ export default function McFinanceApp() {
     if (peopleToPay.length === 0) return;
 
     const isPaid = peopleToPay.every(p => exp.receivedFrom?.includes(p));
+    let updatedExpense: Expense | null = null;
+
     setExpenses(prev => prev.map(e => {
       if (e.id === exp.id) {
         if (isPaid) {
-          return { ...e, receivedFrom: (e.receivedFrom || []).filter(p => !peopleToPay.includes(p)) };
+          updatedExpense = { ...e, receivedFrom: (e.receivedFrom || []).filter(p => !peopleToPay.includes(p)) };
         } else {
           const newReceived = new Set([...(e.receivedFrom || []), ...peopleToPay]);
-          return { ...e, receivedFrom: Array.from(newReceived) };
+          updatedExpense = { ...e, receivedFrom: Array.from(newReceived) };
         }
+        return updatedExpense;
       }
       return e;
     }));
+
+    if (updatedExpense) {
+      saveExpensesToSupabase([updatedExpense]);
+    }
   };
 
   const exportToPDF = () => {
@@ -639,7 +714,9 @@ export default function McFinanceApp() {
     doc.setFontSize(10);
     doc.setTextColor(100);
     const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
-    const filterText = `Filtros: ${monthNames[reportFilters.month]}/${reportFilters.year} | Categoria: ${reportFilters.category} | Centro de Custo: ${reportFilters.costCenter} | Pessoa: ${reportFilters.person}`;
+    const filterMonthText = reportFilters.month === 'Todos' ? 'Todos' : monthNames[reportFilters.month as number];
+    const filterYearText = reportFilters.year === 'Todos' ? 'Todos' : reportFilters.year;
+    const filterText = `Filtros: ${filterMonthText}/${filterYearText} | Categoria: ${reportFilters.category} | Centro de Custo: ${reportFilters.costCenter} | Pessoa: ${reportFilters.person}`;
     doc.text(filterText, 14, 30);
     
     doc.setTextColor(0);
@@ -688,31 +765,38 @@ export default function McFinanceApp() {
   const handleAddExpense = (e: React.FormEvent) => {
     e.preventDefault();
     
+    let itemsToSave: Expense[] = [];
+
     if (editingId) {
       const originalExpense = expenses.find(exp => exp.id === editingId);
       if (applyToFuture && originalExpense && originalExpense.groupId) {
-        setExpenses(expenses.map(exp => {
+        const updatedExpenses = expenses.map(exp => {
           if (exp.id === editingId) {
             return { ...exp, ...formData as Expense };
           } else if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) {
-            // Update future installments in the same group with the same new values (except dates and id)
             return {
               ...exp,
               costCenter: formData.costCenter as CostCenter,
               splitWith: formData.splitWith,
               individualPerson: formData.individualPerson,
-              description: formData.description || exp.description, // keep original desc if empty
+              description: formData.description || exp.description,
               value: formData.value || exp.value,
               category: formData.category as Category,
               card: formData.card as Card,
             };
           }
           return exp;
-        }));
+        });
+
+        itemsToSave = updatedExpenses.filter(exp => 
+          exp.id === editingId || (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate))
+        );
+
+        setExpenses(updatedExpenses);
       } else {
-        setExpenses(expenses.map(exp => 
-          exp.id === editingId ? { ...exp, ...formData as Expense } : exp
-        ));
+        const updated = { ...expenses.find(exp => exp.id === editingId)!, ...formData as Expense };
+        itemsToSave = [updated];
+        setExpenses(expenses.map(exp => exp.id === editingId ? updated : exp));
       }
       setEditingId(null);
       setApplyToFuture(false);
@@ -724,7 +808,6 @@ export default function McFinanceApp() {
       
       for (let i = 0; i < count; i++) {
         const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
-        // Handle month overflow (e.g. Jan 31 -> Feb 28/29)
         if (d.getMonth() !== (baseDate.getMonth() + i) % 12) {
           d.setDate(0);
         }
@@ -737,6 +820,7 @@ export default function McFinanceApp() {
           createdAt: Date.now()
         });
       }
+      itemsToSave = newEntries;
       setExpenses([...newEntries, ...expenses]);
     } else {
       const newExpense: Expense = {
@@ -744,7 +828,12 @@ export default function McFinanceApp() {
         id: Math.random().toString(36).substr(2, 9),
         createdAt: Date.now()
       };
+      itemsToSave = [newExpense];
       setExpenses([newExpense, ...expenses]);
+    }
+
+    if (itemsToSave.length > 0) {
+      saveExpensesToSupabase(itemsToSave);
     }
 
     setShowForm(false);
@@ -761,15 +850,19 @@ export default function McFinanceApp() {
 
   const handleDelete = (id: string) => {
     const originalExpense = expenses.find(exp => exp.id === id);
+    let idsToDelete: string[] = [id];
+
     if (applyToFuture && originalExpense && originalExpense.groupId) {
-      setExpenses(expenses.filter(exp => {
-        if (exp.id === id) return false;
-        if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) return false;
-        return true;
-      }));
-    } else {
-      setExpenses(expenses.filter(exp => exp.id !== id));
+      idsToDelete = expenses.filter(exp => {
+        if (exp.id === id) return true;
+        if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) return true;
+        return false;
+      }).map(exp => exp.id);
     }
+
+    setExpenses(expenses.filter(exp => !idsToDelete.includes(exp.id)));
+    deleteExpensesFromSupabase(idsToDelete);
+
     setShowDeleteConfirm(null);
     setApplyToFuture(false);
   };
@@ -837,6 +930,7 @@ export default function McFinanceApp() {
           const filtered = prev.filter(p => !newRevenues.some(nr => nr.month === p.month && nr.year === p.year));
           return [...filtered, ...newRevenues];
         });
+        saveRevenuesToSupabase(newRevenues);
       }
     };
     reader.readAsText(file);
@@ -883,9 +977,11 @@ export default function McFinanceApp() {
                 <span className="text-[9px] font-bold text-amber-500 uppercase tracking-wider">Modo Local</span>
               </div>
             ) : (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-red-900/20 rounded-full border border-red-500/20">
+              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-red-900/20 rounded-full border border-red-500/20" title={syncErrorMsg || 'Erro'}>
                 <AlertCircle className="w-3 h-3 text-red-500" />
-                <span className="text-[9px] font-bold text-red-500 uppercase tracking-wider">Erro de Conexão</span>
+                <span className="text-[9px] font-bold text-red-500 tracking-wider break-words max-w-[200px]">
+                  {syncErrorMsg ? syncErrorMsg : 'ERRO DE CONEXÃO'}
+                </span>
               </div>
             )}
             {isSyncing && (
@@ -1373,36 +1469,38 @@ export default function McFinanceApp() {
             </div>
 
             {/* Filters */}
-            <div className="bg-[#171717] p-6 rounded-3xl border border-white/5 space-y-6">
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                <div className="space-y-2">
+            <div className="bg-[#171717] p-4 sm:p-6 rounded-3xl border border-white/5 space-y-4 sm:space-y-6">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Mês</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.month}
-                    onChange={(e) => setReportFilters({ ...reportFilters, month: parseInt(e.target.value) })}
+                    onChange={(e) => setReportFilters({ ...reportFilters, month: e.target.value === 'Todos' ? 'Todos' : parseInt(e.target.value) })}
                   >
+                    <option value="Todos">Todos</option>
                     {['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'].map((m, i) => (
                       <option key={m} value={i}>{m}</option>
                     ))}
                   </select>
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Ano</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.year}
-                    onChange={(e) => setReportFilters({ ...reportFilters, year: parseInt(e.target.value) })}
+                    onChange={(e) => setReportFilters({ ...reportFilters, year: e.target.value === 'Todos' ? 'Todos' : parseInt(e.target.value) })}
                   >
+                    <option value="Todos">Todos</option>
                     {[2024, 2025, 2026, 2027, 2028, 2029, 2030].map(y => (
                       <option key={y} value={y}>{y}</option>
                     ))}
                   </select>
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Categoria</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.category}
                     onChange={(e) => setReportFilters({ ...reportFilters, category: e.target.value })}
                   >
@@ -1410,10 +1508,10 @@ export default function McFinanceApp() {
                     {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Centro de Custo</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.costCenter}
                     onChange={(e) => setReportFilters({ ...reportFilters, costCenter: e.target.value })}
                   >
@@ -1421,10 +1519,10 @@ export default function McFinanceApp() {
                     {COST_CENTERS.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Pessoa</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.person}
                     onChange={(e) => setReportFilters({ ...reportFilters, person: e.target.value })}
                   >
@@ -1432,10 +1530,10 @@ export default function McFinanceApp() {
                     {PEOPLE.map(p => <option key={p} value={p}>{p}</option>)}
                   </select>
                 </div>
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Status</p>
                   <select 
-                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-sm text-gray-300 outline-none"
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
                     value={reportFilters.status}
                     onChange={(e) => setReportFilters({ ...reportFilters, status: e.target.value })}
                   >
@@ -1448,24 +1546,24 @@ export default function McFinanceApp() {
             </div>
 
             {/* Dashboard Visual */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
               {/* Balance Summary Card */}
-              <div className={`p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${reportFilters.person === 'Todos' ? (totals.reportRevenue - totals.personReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20') : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/20'}`}>
+              <div className={`p-6 sm:p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${reportFilters.person === 'Todos' ? (totals.reportRevenue - totals.personReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20') : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/20'}`}>
                 <div className="relative z-10">
-                  <div className="flex justify-between items-start mb-6">
-                    <div>
-                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-1">
+                  <div className="flex justify-between items-start mb-6 gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[10px] uppercase tracking-[0.2em] font-bold opacity-70 mb-1 truncate">
                         {reportFilters.person === 'Todos' ? 'Mccley - Saldo do Mês' : `${reportFilters.person} - Total Selecionado`}
                       </p>
-                      <h3 className="text-4xl font-bold">
+                      <h3 className="text-3xl sm:text-4xl font-bold truncate">
                         R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.personReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                       </h3>
                     </div>
                     <button 
                       onClick={exportToPDF}
-                      className="flex items-center gap-2 bg-black/20 hover:bg-black/40 text-white px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors backdrop-blur-sm"
+                      className="flex items-center gap-2 bg-black/20 hover:bg-black/40 text-white px-3 sm:px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors backdrop-blur-sm shrink-0"
                     >
-                      <Download className="w-4 h-4" /> PDF
+                      <Download className="w-4 h-4" /> <span className="hidden sm:inline">PDF</span>
                     </button>
                   </div>
                   
@@ -1486,7 +1584,7 @@ export default function McFinanceApp() {
               </div>
 
               {/* Categories Chart */}
-              <div className="bg-[#171717]/80 backdrop-blur-xl p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-xl">
+              <div className="bg-[#171717]/80 backdrop-blur-xl p-6 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-white/5 space-y-6 shadow-xl">
                 <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500 mb-2">Top 5 Categorias</p>
                 <div className="space-y-4">
                   {Object.entries(totals.reportByCategory)
@@ -1537,37 +1635,40 @@ export default function McFinanceApp() {
                   const hasPeopleToPay = !(exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley');
 
                   return (
-                  <div key={exp.id} className={`p-6 rounded-2xl border flex justify-between items-center group transition-colors ${isPaid ? 'bg-[#064E3B]/10 border-[#10B981]/20' : 'bg-[#171717] border-white/5'}`}>
-                    <div className="flex items-center gap-4">
+                  <div key={exp.id} className={`p-4 md:p-6 rounded-2xl border flex flex-col md:flex-row justify-between items-start md:items-center gap-4 md:gap-0 group transition-colors ${isPaid ? 'bg-[#064E3B]/10 border-[#10B981]/20' : 'bg-[#171717] border-white/5'}`}>
+                    {/* Left Section - Description and Details */}
+                    <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto flex-1 min-w-0">
                       {hasPeopleToPay && (
                         <input 
                           type="checkbox" 
                           checked={isPaid}
                           onChange={() => handleToggleAllReceived(exp)}
-                          className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
+                          className="w-5 h-5 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer shrink-0"
                         />
                       )}
-                      <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${exp.category === 'Lunna' ? 'bg-purple-900/20 text-purple-400' : 'bg-emerald-900/20 text-[#10B981]'}`}>
-                        <Receipt className="w-6 h-6" />
+                      <div className={`w-10 h-10 md:w-12 md:h-12 shrink-0 rounded-2xl flex items-center justify-center ${exp.category === 'Lunna' ? 'bg-purple-900/20 text-purple-400' : 'bg-emerald-900/20 text-[#10B981]'}`}>
+                        <Receipt className="w-5 h-5 md:w-6 md:h-6" />
                       </div>
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <p className={`font-bold ${isPaid ? 'text-gray-400 line-through' : 'text-white'}`}>{exp.description}</p>
-                          {isPaid && <CheckCircle className="w-4 h-4 text-[#10B981]" />}
+                          <p className={`font-bold truncate ${isPaid ? 'text-gray-400 line-through' : 'text-white'}`} title={exp.description}>{exp.description}</p>
+                          {isPaid && <CheckCircle className="w-4 h-4 text-[#10B981] shrink-0" />}
                         </div>
                         <div className="flex items-center gap-2">
-                          <p className="text-xs text-gray-500">{new Date(exp.dueDate).toLocaleDateString('pt-BR')}</p>
-                          <span className="w-1 h-1 rounded-full bg-gray-700" />
-                          <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold">{exp.costCenter}</p>
+                          <p className="text-xs text-gray-500 whitespace-nowrap">{new Date(exp.dueDate).toLocaleDateString('pt-BR')}</p>
+                          <span className="w-1 h-1 rounded-full bg-gray-700 shrink-0" />
+                          <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold truncate">{exp.costCenter}</p>
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <div className="text-right">
-                        <p className="font-bold text-lg">R$ {exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                    
+                    {/* Right Section - Amounts and Actions */}
+                    <div className="flex items-center justify-between md:justify-end gap-4 w-full md:w-auto border-t md:border-t-0 border-white/5 pt-3 md:pt-0 shrink-0">
+                      <div className="text-left md:text-right">
+                        <p className="font-bold text-lg whitespace-nowrap">R$ {exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                         <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">{exp.card}</p>
                       </div>
-                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex gap-2 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity shrink-0">
                         <button 
                           onClick={() => handleEdit(exp)}
                           className="p-2 bg-gray-800 rounded-lg text-gray-400 hover:text-[#10B981] transition-colors"
@@ -1590,19 +1691,19 @@ export default function McFinanceApp() {
           </div>
         ) : activeTab === 'receita' ? (
           <div className="space-y-8">
-            <div className="flex justify-between items-start">
+            <div className="flex flex-col sm:flex-row justify-between items-start gap-6 sm:gap-0">
               <div className="space-y-2">
                 <h2 className="text-4xl font-bold">Lançar Receita</h2>
                 <p className="text-gray-500 text-sm">Gerencie sua receita mensal e acompanhe as métricas.</p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap sm:flex-nowrap gap-2 w-full sm:w-auto">
                 <button 
                   onClick={downloadRevenueCSVTemplate}
-                  className="flex items-center gap-2 bg-[#262626] hover:bg-[#333] text-gray-300 px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors shadow-lg"
+                  className="flex-1 sm:flex-none justify-center flex items-center gap-2 bg-[#262626] hover:bg-[#333] text-gray-300 px-4 py-3 sm:py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors shadow-lg whitespace-nowrap"
                 >
-                  <Download className="w-4 h-4" /> Baixar Modelo CSV
+                  <Download className="w-4 h-4" /> Modelo CSV
                 </button>
-                <label className="flex items-center gap-2 bg-[#10B981]/20 hover:bg-[#10B981]/30 text-[#10B981] px-4 py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer border border-[#10B981]/30 shadow-lg">
+                <label className="flex-1 sm:flex-none justify-center flex items-center gap-2 bg-[#10B981]/20 hover:bg-[#10B981]/30 text-[#10B981] px-4 py-3 sm:py-2 rounded-xl text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer border border-[#10B981]/30 shadow-lg whitespace-nowrap">
                   <Upload className="w-4 h-4" /> Upload CSV
                   <input type="file" accept=".csv" className="hidden" onChange={handleRevenueCSVUpload} />
                 </label>
@@ -1612,22 +1713,22 @@ export default function McFinanceApp() {
             {/* Dashboard Média dos últimos 12 meses */}
             <div className="bg-[#171717]/80 backdrop-blur-xl p-8 rounded-[2rem] border border-white/5 space-y-6 shadow-2xl">
               <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Média dos últimos 12 meses</p>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
-                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Salário</p>
-                  <p className="font-bold text-lg text-white">R$ {revenueAverages.salary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+                <div className="bg-[#262626]/50 p-3 sm:p-4 rounded-2xl border border-white/5">
+                  <p className="text-[10px] sm:text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Salário</p>
+                  <p className="font-bold text-sm sm:text-lg text-white truncate" title={`R$ ${revenueAverages.salary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}>R$ {revenueAverages.salary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                 </div>
-                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
-                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Comissão</p>
-                  <p className="font-bold text-lg text-white">R$ {revenueAverages.commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                <div className="bg-[#262626]/50 p-3 sm:p-4 rounded-2xl border border-white/5">
+                  <p className="text-[10px] sm:text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">Comissão</p>
+                  <p className="font-bold text-sm sm:text-lg text-white truncate" title={`R$ ${revenueAverages.commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}>R$ {revenueAverages.commission.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                 </div>
-                <div className="bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
-                  <p className="text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">DSR</p>
-                  <p className="font-bold text-lg text-white">R$ {revenueAverages.dsr.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                <div className="bg-[#262626]/50 p-3 sm:p-4 rounded-2xl border border-white/5">
+                  <p className="text-[10px] sm:text-xs text-gray-400 uppercase tracking-wider font-bold mb-1">DSR</p>
+                  <p className="font-bold text-sm sm:text-lg text-white truncate" title={`R$ ${revenueAverages.dsr.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}>R$ {revenueAverages.dsr.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                 </div>
-                <div className="bg-emerald-900/10 p-4 rounded-2xl border border-emerald-500/20 shadow-inner">
-                  <p className="text-xs text-emerald-500 uppercase tracking-wider font-bold mb-1">Salário Bruto</p>
-                  <p className="font-bold text-lg text-[#10B981]">R$ {revenueAverages.grossSalary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
+                <div className="bg-emerald-900/10 p-3 sm:p-4 rounded-2xl border border-emerald-500/20 shadow-inner">
+                  <p className="text-[10px] sm:text-xs text-emerald-500 uppercase tracking-wider font-bold mb-1 truncate">Salário Bruto</p>
+                  <p className="font-bold text-sm sm:text-lg text-[#10B981] truncate" title={`R$ ${revenueAverages.grossSalary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`}>R$ {revenueAverages.grossSalary.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                 </div>
               </div>
             </div>
@@ -1750,6 +1851,8 @@ export default function McFinanceApp() {
                     setRevenues([...revenues, newRevenue]);
                   }
                   
+                  saveRevenuesToSupabase([newRevenue]);
+                  
                   setRevenueFormData({
                     ...revenueFormData,
                     salary: 0,
@@ -1797,7 +1900,10 @@ export default function McFinanceApp() {
                         }} className="text-blue-500 p-3 hover:bg-blue-500/10 rounded-xl transition-colors self-center">
                           <Edit2 className="w-5 h-5" />
                         </button>
-                        <button onClick={() => setRevenues(revenues.filter(rev => rev.id !== r.id))} className="text-red-500 p-3 hover:bg-red-500/10 rounded-xl transition-colors self-center">
+                        <button onClick={() => {
+                          setRevenues(revenues.filter(rev => rev.id !== r.id));
+                          deleteRevenuesFromSupabase(r.month, r.year);
+                        }} className="text-red-500 p-3 hover:bg-red-500/10 rounded-xl transition-colors self-center">
                           <Trash2 className="w-5 h-5" />
                         </button>
                       </div>
@@ -1896,20 +2002,21 @@ export default function McFinanceApp() {
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
                 onClick={() => {
-                  if (loanFormData.person && loanFormData.totalValue && loanFormData.installmentsTotal) {
-                    const newLoan: Loan = {
-                      id: Math.random().toString(36).substr(2, 9),
-                      person: loanFormData.person,
-                      totalValue: loanFormData.totalValue,
-                      installmentsTotal: loanFormData.installmentsTotal,
-                      installmentsPaid: 0,
-                      monthlyValue: loanFormData.totalValue / loanFormData.installmentsTotal,
-                      description: loanFormData.description || 'Empréstimo',
-                      date: new Date().toISOString().split('T')[0]
-                    };
-                    setLoans([newLoan, ...loans]);
-                    setLoanFormData(initialLoanFormState);
-                  }
+                    if (loanFormData.person && loanFormData.totalValue && loanFormData.installmentsTotal) {
+                      const newLoan: Loan = {
+                        id: Math.random().toString(36).substr(2, 9),
+                        person: loanFormData.person,
+                        totalValue: loanFormData.totalValue,
+                        installmentsTotal: loanFormData.installmentsTotal,
+                        installmentsPaid: 0,
+                        monthlyValue: loanFormData.totalValue / loanFormData.installmentsTotal,
+                        description: loanFormData.description || 'Empréstimo',
+                        date: new Date().toISOString().split('T')[0]
+                      };
+                      setLoans([newLoan, ...loans]);
+                      saveLoansToSupabase([newLoan]);
+                      setLoanFormData(initialLoanFormState);
+                    }
                 }}
                 className="w-full bg-gradient-to-r from-[#10B981] to-[#059669] text-white font-bold py-4 rounded-2xl shadow-lg shadow-[#10B981]/25 hover:shadow-[#10B981]/40 transition-all flex items-center justify-center gap-2"
               >
@@ -1936,14 +2043,14 @@ export default function McFinanceApp() {
                       animate={{ opacity: 1, scale: 1 }}
                       className="bg-[#171717]/80 backdrop-blur-xl p-6 rounded-2xl border border-white/10 flex flex-col gap-4 shadow-xl"
                     >
-                      <div className="flex justify-between items-start">
+                      <div className="flex flex-col sm:flex-row justify-between items-start gap-4 sm:gap-0">
                         <div>
                           <h4 className="font-bold text-lg text-white">{loan.person}</h4>
                           <p className="text-sm text-gray-400">{loan.description}</p>
                         </div>
-                        <div className="text-right">
+                        <div className="text-left sm:text-right border-t border-white/5 pt-3 sm:pt-0 sm:border-0 w-full sm:w-auto">
                           <p className="text-xs text-gray-500 uppercase tracking-wider font-bold mb-1">Total Emprestado</p>
-                          <div className="flex items-center justify-end gap-2">
+                          <div className="flex items-center justify-start sm:justify-end gap-2">
                             {editingTotal[loan.id] !== undefined ? (
                               <div className="flex items-center gap-1 bg-[#262626] rounded-lg px-2 py-1 border border-white/5 focus-within:border-red-500/50">
                                 <span className="text-xs font-bold text-red-400">R$</span>
@@ -1954,7 +2061,9 @@ export default function McFinanceApp() {
                                   value={editingTotal[loan.id]}
                                   onChange={e => setEditingTotal({ ...editingTotal, [loan.id]: parseFloat(e.target.value) || 0 })}
                                   onBlur={() => {
-                                      setLoans(loans.map(l => l.id === loan.id ? { ...l, totalValue: editingTotal[loan.id] } : l));
+                                      const updatedLoan = { ...loan, totalValue: editingTotal[loan.id] };
+                                      setLoans(loans.map(l => l.id === loan.id ? updatedLoan : l));
+                                      saveLoansToSupabase([updatedLoan]);
                                       const newEditing = { ...editingTotal };
                                       delete newEditing[loan.id];
                                       setEditingTotal(newEditing);
@@ -1990,8 +2099,8 @@ export default function McFinanceApp() {
                         </div>
                       </div>
 
-                      <div className="flex justify-between items-center pt-2">
-                        <div className="flex items-center gap-2">
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pt-4 gap-4 sm:gap-0">
+                        <div className="flex items-center justify-between sm:justify-start w-full sm:w-auto gap-2">
                           <span className="text-sm">Próxima parcela:</span>
                           <div className="flex items-center gap-1 bg-[#262626] rounded-lg px-2 py-1 border border-white/5 focus-within:border-[#10B981]/50 focus-within:ring-1 focus-within:ring-[#10B981]/50 transition-all">
                             <span className="text-xs font-bold text-[#10B981]">R$</span>
@@ -2005,22 +2114,19 @@ export default function McFinanceApp() {
                           </div>
                         </div>
                         
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-end w-full sm:w-auto gap-2">
                           {loan.installmentsPaid < loan.installmentsTotal && remainingBalance > 0 ? (
                             <button 
                               onClick={() => {
-                                setLoans(loans.map(l => {
-                                  if (l.id === loan.id) {
-                                    const newPayment = { date: new Date().toISOString(), amount: editingValue };
-                                    return { 
-                                      ...l, 
-                                      installmentsPaid: l.installmentsPaid + 1,
-                                      amountPaid: (l.amountPaid ?? (l.installmentsPaid * l.monthlyValue)) + editingValue,
-                                      paymentHistory: [...(l.paymentHistory || []), newPayment]
-                                    };
-                                  }
-                                  return l;
-                                }));
+                                const newPayment = { date: new Date().toISOString(), amount: editingValue };
+                                const updatedLoan = {
+                                  ...loan,
+                                  installmentsPaid: loan.installmentsPaid + 1,
+                                  amountPaid: (loan.amountPaid ?? (loan.installmentsPaid * loan.monthlyValue)) + editingValue,
+                                  paymentHistory: [...(loan.paymentHistory || []), newPayment]
+                                };
+                                setLoans(loans.map(l => l.id === loan.id ? updatedLoan : l));
+                                saveLoansToSupabase([updatedLoan]);
                                 const newEditing = { ...editingInstallment };
                                 delete newEditing[loan.id];
                                 setEditingInstallment(newEditing);
@@ -2035,7 +2141,10 @@ export default function McFinanceApp() {
                             </span>
                           )}
                           <button 
-                            onClick={() => setLoans(loans.filter(l => l.id !== loan.id))}
+                            onClick={() => {
+                              setLoans(loans.filter(l => l.id !== loan.id));
+                              deleteLoansFromSupabase([loan.id]);
+                            }}
                             className="p-2 text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
                           >
                             <Trash2 className="w-5 h-5" />
