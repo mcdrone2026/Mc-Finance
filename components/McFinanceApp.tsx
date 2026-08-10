@@ -112,6 +112,12 @@ const formatDateBR = (dateStr: string) => {
   return `${dd}/${mm}/${year}`;
 };
 
+const getGroupId = (exp: Expense) => {
+  if (exp.groupId) return exp.groupId;
+  const baseDesc = exp.description.replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+  return `retro-${baseDesc}-${exp.value}-${exp.costCenter}`;
+};
+
 export default function McFinanceApp() {
   const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita' | 'emprestimos'>('ledger');
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -876,12 +882,19 @@ export default function McFinanceApp() {
 
   const handleDelete = (id: string) => {
     const originalExpense = expenses.find(exp => exp.id === id);
+    if (!originalExpense) return;
+
     let idsToDelete: string[] = [id];
 
-    if (applyToFuture && originalExpense && originalExpense.groupId) {
+    if (applyToFuture) {
+      const originalGroupId = getGroupId(originalExpense);
       idsToDelete = expenses.filter(exp => {
         if (exp.id === id) return true;
-        if (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate) return true;
+        
+        const matchesGroup = (originalExpense.groupId && exp.groupId === originalExpense.groupId) ||
+                             (getGroupId(exp) === originalGroupId);
+
+        if (matchesGroup && exp.dueDate >= originalExpense.dueDate) return true;
         return false;
       }).map(exp => exp.id);
     }
@@ -2302,20 +2315,42 @@ export default function McFinanceApp() {
                 <p className="text-gray-500 text-sm">Esta ação não pode ser desfeita. O valor será removido do seu livro caixa.</p>
               </div>
               
-              {showDeleteConfirm && expenses.find(e => e.id === showDeleteConfirm)?.groupId && (
-                <div className="flex items-start gap-3 p-4 bg-[#262626]/50 rounded-xl border border-white/5 text-left">
-                  <input 
-                    type="checkbox" 
-                    id="deleteApplyToFuture"
-                    checked={applyToFuture}
-                    onChange={(e) => setApplyToFuture(e.target.checked)}
-                    className="w-5 h-5 mt-0.5 rounded border-gray-700 bg-transparent text-red-500 focus:ring-red-500 cursor-pointer"
-                  />
-                  <label htmlFor="deleteApplyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer leading-tight">
-                    Excluir também todas as parcelas futuras associadas a este lançamento.
-                  </label>
-                </div>
-              )}
+              {(() => {
+                const targetExp = showDeleteConfirm ? expenses.find(e => e.id === showDeleteConfirm) : null;
+                if (!targetExp) return null;
+
+                const targetGroupId = getGroupId(targetExp);
+                const hasMatchingFutureItems = expenses.some(e => {
+                  if (e.id === targetExp.id) return false;
+                  const matchesGroup = (targetExp.groupId && e.groupId === targetExp.groupId) || (getGroupId(e) === targetGroupId);
+                  return matchesGroup && e.dueDate >= targetExp.dueDate;
+                });
+
+                const isGroupOrParcel = Boolean(
+                  targetExp.groupId ||
+                  targetExp.isRecurring ||
+                  (targetExp.installments && targetExp.installments !== 'À vista' && targetExp.installments !== '1x') ||
+                  /\(\s*\d+\s*\/\s*\d+\s*\)/.test(targetExp.description) ||
+                  hasMatchingFutureItems
+                );
+
+                if (!isGroupOrParcel) return null;
+
+                return (
+                  <div className="flex items-start gap-3 p-4 bg-[#262626]/50 rounded-xl border border-white/5 text-left">
+                    <input 
+                      type="checkbox" 
+                      id="deleteApplyToFuture"
+                      checked={applyToFuture}
+                      onChange={(e) => setApplyToFuture(e.target.checked)}
+                      className="w-5 h-5 mt-0.5 rounded border-gray-700 bg-transparent text-red-500 focus:ring-red-500 cursor-pointer"
+                    />
+                    <label htmlFor="deleteApplyToFuture" className="text-sm text-gray-300 font-medium cursor-pointer leading-tight">
+                      Excluir também todas as parcelas/lançamentos futuros associados a este item.
+                    </label>
+                  </div>
+                );
+              })()}
 
               <div className="grid grid-cols-2 gap-4">
                 <button 
