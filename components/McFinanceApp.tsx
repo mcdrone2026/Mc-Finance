@@ -118,6 +118,32 @@ const getGroupId = (exp: Expense) => {
   return `retro-${baseDesc}-${exp.value}-${exp.costCenter}`;
 };
 
+const getExpensePersonShare = (exp: Expense, personFilter: string): number => {
+  if (personFilter === 'Todos') return exp.value;
+  const targetPerson = personFilter as Person;
+
+  if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+    const includesMccley = exp.splitWith.includes('Mccley');
+    const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
+    if (targetPerson === 'Mccley') {
+      return exp.value / divisor;
+    } else if (exp.splitWith.includes(targetPerson)) {
+      return exp.value / divisor;
+    }
+  } else if (exp.costCenter === 'Individual') {
+    if (exp.individualPerson === targetPerson) {
+      return exp.value;
+    }
+  } else if (exp.costCenter === 'Lunna 50%') {
+    if (targetPerson === 'Mccley') return exp.value * 0.5;
+    if (targetPerson === 'Tarcilla') return exp.value * 0.5;
+  } else if (exp.costCenter === 'Lunna 30%') {
+    if (targetPerson === 'Mccley') return exp.value * 0.7;
+    if (targetPerson === 'Tarcilla') return exp.value * 0.3;
+  }
+  return 0;
+};
+
 export default function McFinanceApp() {
   const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita' | 'emprestimos'>('ledger');
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -615,40 +641,19 @@ export default function McFinanceApp() {
       return matchesMonth && matchesCategory && matchesCostCenter && matchesPerson && matchesStatus;
     }).map(exp => ({ ...exp, groupId: getGroupId(exp) }));
 
-    const reportTotal = filteredExpenses.reduce((acc, curr) => acc + curr.value, 0);
-
-    const personReportTotal = filteredExpenses.reduce((acc, exp) => {
-      let share = 0;
-      const targetPerson = reportFilters.person === 'Todos' ? 'Mccley' : reportFilters.person;
-
-      if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
-        const includesMccley = exp.splitWith.includes('Mccley');
-        const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
-        if (targetPerson === 'Mccley') {
-          share = exp.value / divisor;
-        } else if (exp.splitWith.includes(targetPerson as Person)) {
-          share = exp.value / divisor;
-        }
-      } else if (exp.costCenter === 'Individual') {
-        if (exp.individualPerson === targetPerson) {
-          share = exp.value;
-        }
-      } else if (exp.costCenter === 'Lunna 50%') {
-        if (targetPerson === 'Mccley') share = exp.value * 0.5;
-        if (targetPerson === 'Tarcilla') share = exp.value * 0.5;
-      } else if (exp.costCenter === 'Lunna 30%') {
-        if (targetPerson === 'Mccley') share = exp.value * 0.7;
-        if (targetPerson === 'Tarcilla') share = exp.value * 0.3;
-      }
-      return acc + share;
+    const reportTotal = filteredExpenses.reduce((acc, exp) => {
+      return acc + getExpensePersonShare(exp, reportFilters.person);
     }, 0);
+
+    const personReportTotal = reportTotal;
 
     const reportRevenue = (reportFilters.month === 'Todos' || reportFilters.year === 'Todos') ? 0 :
                           revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.netSalary || 
                           revenues.find(r => r.month === reportFilters.month && r.year === reportFilters.year)?.value || 0;
 
     const reportByCategory = filteredExpenses.reduce((acc, exp) => {
-      acc[exp.category] = (acc[exp.category] || 0) + exp.value;
+      const share = getExpensePersonShare(exp, reportFilters.person);
+      acc[exp.category] = (acc[exp.category] || 0) + share;
       return acc;
     }, {} as Record<string, number>);
 
@@ -761,14 +766,17 @@ export default function McFinanceApp() {
 
     // Table
     const tableColumn = ['Descrição', 'Vencimento', 'Centro de Custo', 'Valor (R$)', 'Categoria', 'Cartão'];
-    const tableRows = totals.filteredExpenses.map(exp => [
-      exp.description,
-      formatDateBR(exp.dueDate),
-      exp.costCenter,
-      exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      exp.category,
-      exp.card
-    ]);
+    const tableRows = totals.filteredExpenses.map(exp => {
+      const share = getExpensePersonShare(exp, reportFilters.person);
+      return [
+        exp.description,
+        formatDateBR(exp.dueDate),
+        exp.costCenter,
+        share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        exp.category,
+        exp.card
+      ];
+    });
 
     tableRows.push([
       'TOTAL',
@@ -1713,10 +1721,20 @@ export default function McFinanceApp() {
                     
                     {/* Right Section - Amounts and Actions */}
                     <div className="flex items-center justify-between md:justify-end gap-4 w-full md:w-auto border-t md:border-t-0 border-white/5 pt-3 md:pt-0 shrink-0">
-                      <div className="text-left md:text-right">
-                        <p className="font-bold text-lg whitespace-nowrap">R$ {exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-                        <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">{exp.card}</p>
-                      </div>
+                      {(() => {
+                        const displayShare = getExpensePersonShare(exp, reportFilters.person);
+                        const isShared = reportFilters.person !== 'Todos' && Math.abs(displayShare - exp.value) > 0.01;
+
+                        return (
+                          <div className="text-left md:text-right">
+                            <p className="font-bold text-lg whitespace-nowrap">R$ {displayShare.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            {isShared && (
+                              <p className="text-[10px] text-gray-500 font-medium">Total: R$ {exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                            )}
+                            <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">{exp.card}</p>
+                          </div>
+                        );
+                      })()}
                       <div className="flex gap-2 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity shrink-0">
                         <button 
                           onClick={() => handleEdit(exp)}
