@@ -90,6 +90,28 @@ const COST_CENTERS: CostCenter[] = ['Compartilhado', 'Individual', 'Lunna 50%', 
 const CATEGORIES: Category[] = ['Almoço', 'Bebida', 'Casa do Lago', 'Combustível', 'Esporte', 'Farmacia', 'Fixa', 'Ifood', 'Lunna', 'Manutenção Carro', 'Manutenção Casa', 'Mercado', 'Outros', 'Saúde', 'Velli', 'Viagem'];
 const CARDS: Card[] = ['Nubank', 'Neon', 'Bradesco', 'C6Bank', 'Pix'];
 
+// Safe Date Helper Functions to avoid UTC Timezone Shift Bugs (e.g. 2026-09-01 becoming 2026-08-31 GMT-3)
+const parseDueDate = (dateStr: string) => {
+  if (!dateStr) return { year: 1970, month: 0, day: 1 };
+  const parts = dateStr.split('T')[0].split('-');
+  if (parts.length === 3) {
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1; // 0-indexed month (0-11)
+    const day = parseInt(parts[2], 10);
+    return { year, month, day };
+  }
+  const d = new Date(dateStr);
+  return { year: d.getFullYear(), month: d.getMonth(), day: d.getDate() };
+};
+
+const formatDateBR = (dateStr: string) => {
+  if (!dateStr) return '';
+  const { year, month, day } = parseDueDate(dateStr);
+  const dd = String(day).padStart(2, '0');
+  const mm = String(month + 1).padStart(2, '0');
+  return `${dd}/${mm}/${year}`;
+};
+
 export default function McFinanceApp() {
   const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita' | 'emprestimos'>('ledger');
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -436,9 +458,7 @@ export default function McFinanceApp() {
     };
 
     expenses.forEach(exp => {
-      const expDate = new Date(exp.dueDate);
-      const expMonth = expDate.getMonth();
-      const expYear = expDate.getFullYear();
+      const { year: expYear, month: expMonth } = parseDueDate(exp.dueDate);
       
       const isCurrentMonth = expMonth === currentMonth && expYear === currentYear;
       const isPastMonth = expYear < currentYear || (expYear === currentYear && expMonth < currentMonth);
@@ -513,8 +533,8 @@ export default function McFinanceApp() {
     for (let m = currentMonth + 1; m < 12; m++) {
       let monthlyMccleyTotal = 0;
       expenses.forEach(exp => {
-        const expDate = new Date(exp.dueDate);
-        if (expDate.getMonth() === m && expDate.getFullYear() === currentYear) {
+        const { year: expYear, month: expMonth } = parseDueDate(exp.dueDate);
+        if (expMonth === m && expYear === currentYear) {
           let mccleyShare = 0;
           if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
             const includesMccley = exp.splitWith.includes('Mccley');
@@ -542,9 +562,9 @@ export default function McFinanceApp() {
 
     // Filtered expenses for the report
     const filteredExpenses = expenses.filter(exp => {
-      const expDate = new Date(exp.dueDate);
-      const matchesMonth = (reportFilters.month === 'Todos' || expDate.getMonth() === reportFilters.month) && 
-                           (reportFilters.year === 'Todos' || expDate.getFullYear() === reportFilters.year);
+      const { year: expYear, month: expMonth } = parseDueDate(exp.dueDate);
+      const matchesMonth = (reportFilters.month === 'Todos' || expMonth === reportFilters.month) && 
+                           (reportFilters.year === 'Todos' || expYear === reportFilters.year);
       const matchesCategory = reportFilters.category === 'Todas' || exp.category === reportFilters.category;
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
       
@@ -727,9 +747,9 @@ export default function McFinanceApp() {
     const tableColumn = ['Descrição', 'Vencimento', 'Centro de Custo', 'Valor (R$)', 'Categoria', 'Cartão'];
     const tableRows = totals.filteredExpenses.map(exp => [
       exp.description,
-      new Date(exp.dueDate).toLocaleDateString('pt-BR'),
+      formatDateBR(exp.dueDate),
       exp.costCenter,
-      exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }),
+      exp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
       exp.category,
       exp.card
     ]);
@@ -773,7 +793,7 @@ export default function McFinanceApp() {
         const updatedExpenses = expenses.map(exp => {
           if (exp.id === editingId) {
             return { ...exp, ...formData as Expense };
-          } else if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) {
+          } else if (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate) {
             return {
               ...exp,
               costCenter: formData.costCenter as CostCenter,
@@ -789,7 +809,7 @@ export default function McFinanceApp() {
         });
 
         itemsToSave = updatedExpenses.filter(exp => 
-          exp.id === editingId || (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate))
+          exp.id === editingId || (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate)
         );
 
         setExpenses(updatedExpenses);
@@ -801,22 +821,28 @@ export default function McFinanceApp() {
       setEditingId(null);
       setApplyToFuture(false);
     } else if (formData.isRecurring) {
-      const baseDate = new Date(formData.dueDate || '');
+      const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || new Date().toISOString().split('T')[0]);
       const newEntries: Expense[] = [];
       const count = formData.recurringCount || 2;
       const groupId = Math.random().toString(36).substr(2, 9);
       
       for (let i = 0; i < count; i++) {
-        const d = new Date(baseDate.getFullYear(), baseDate.getMonth() + i, baseDate.getDate());
-        if (d.getMonth() !== (baseDate.getMonth() + i) % 12) {
-          d.setDate(0);
-        }
+        let m = baseMonth + i;
+        let y = baseYear + Math.floor(m / 12);
+        m = m % 12;
+        
+        const daysInMonth = new Date(y, m + 1, 0).getDate();
+        const actualDay = Math.min(baseDay, daysInMonth);
+        
+        const formattedMonth = String(m + 1).padStart(2, '0');
+        const formattedDay = String(actualDay).padStart(2, '0');
+        const dueDateStr = `${y}-${formattedMonth}-${formattedDay}`;
         
         newEntries.push({
           ...formData as Expense,
           id: Math.random().toString(36).substr(2, 9),
           groupId,
-          dueDate: d.toISOString().split('T')[0],
+          dueDate: dueDateStr,
           createdAt: Date.now()
         });
       }
@@ -855,7 +881,7 @@ export default function McFinanceApp() {
     if (applyToFuture && originalExpense && originalExpense.groupId) {
       idsToDelete = expenses.filter(exp => {
         if (exp.id === id) return true;
-        if (exp.groupId === originalExpense.groupId && new Date(exp.dueDate) >= new Date(originalExpense.dueDate)) return true;
+        if (exp.groupId === originalExpense.groupId && exp.dueDate >= originalExpense.dueDate) return true;
         return false;
       }).map(exp => exp.id);
     }
@@ -1556,7 +1582,7 @@ export default function McFinanceApp() {
                         {reportFilters.person === 'Todos' ? 'Mccley - Saldo do Mês' : `${reportFilters.person} - Total Selecionado`}
                       </p>
                       <h3 className="text-3xl sm:text-4xl font-bold truncate">
-                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.personReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.personReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </h3>
                     </div>
                     <button 
@@ -1655,7 +1681,7 @@ export default function McFinanceApp() {
                           {isPaid && <CheckCircle className="w-4 h-4 text-[#10B981] shrink-0" />}
                         </div>
                         <div className="flex items-center gap-2">
-                          <p className="text-xs text-gray-500 whitespace-nowrap">{new Date(exp.dueDate).toLocaleDateString('pt-BR')}</p>
+                          <p className="text-xs text-gray-500 whitespace-nowrap">{formatDateBR(exp.dueDate)}</p>
                           <span className="w-1 h-1 rounded-full bg-gray-700 shrink-0" />
                           <p className="text-[10px] uppercase tracking-widest text-gray-500 font-bold truncate">{exp.costCenter}</p>
                         </div>
