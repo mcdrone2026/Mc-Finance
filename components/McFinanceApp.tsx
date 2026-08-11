@@ -701,7 +701,7 @@ export default function McFinanceApp() {
   const handleToggleReceived = (id: string, person: Person, type: 'expense' | 'loan') => {
     if (type === 'expense') {
       let updatedExpense: Expense | null = null;
-      setExpenses(prev => prev.map(exp => {
+      const updatedExpenses = expenses.map(exp => {
         if (exp.id === id) {
           const receivedFrom = exp.receivedFrom || [];
           const newReceived = receivedFrom.includes(person)
@@ -711,13 +711,16 @@ export default function McFinanceApp() {
           return updatedExpense;
         }
         return exp;
-      }));
+      });
+
+      setExpenses(updatedExpenses);
+
       if (updatedExpense) {
         saveExpensesToSupabase([updatedExpense]);
       }
     } else if (type === 'loan') {
       let updatedLoan: Loan | null = null;
-      setLoans(prev => prev.map(loan => {
+      const updatedLoans = loans.map(loan => {
         if (loan.id === id) {
           const payment = { date: new Date().toISOString(), amount: loan.monthlyValue };
           updatedLoan = {
@@ -728,7 +731,10 @@ export default function McFinanceApp() {
           return updatedLoan;
         }
         return loan;
-      }));
+      });
+
+      setLoans(updatedLoans);
+
       if (updatedLoan) {
         saveLoansToSupabase([updatedLoan]);
       }
@@ -750,7 +756,7 @@ export default function McFinanceApp() {
     const isPaid = peopleToPay.every(p => exp.receivedFrom?.includes(p));
     let updatedExpense: Expense | null = null;
 
-    setExpenses(prev => prev.map(e => {
+    const updatedExpenses = expenses.map(e => {
       if (e.id === exp.id) {
         if (isPaid) {
           updatedExpense = { ...e, receivedFrom: (e.receivedFrom || []).filter(p => !peopleToPay.includes(p)) };
@@ -761,7 +767,9 @@ export default function McFinanceApp() {
         return updatedExpense;
       }
       return e;
-    }));
+    });
+
+    setExpenses(updatedExpenses);
 
     if (updatedExpense) {
       saveExpensesToSupabase([updatedExpense]);
@@ -976,6 +984,7 @@ export default function McFinanceApp() {
           id: Math.random().toString(36).substr(2, 9),
           groupId,
           dueDate: dueDateStr,
+          receivedFrom: [],
           createdAt: Date.now()
         });
       }
@@ -985,6 +994,7 @@ export default function McFinanceApp() {
       const newExpense: Expense = {
         ...formData as Expense,
         id: Math.random().toString(36).substr(2, 9),
+        receivedFrom: [],
         createdAt: Date.now()
       };
       itemsToSave = [newExpense];
