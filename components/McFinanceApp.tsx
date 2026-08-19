@@ -148,16 +148,19 @@ const isSameSeries = (e1: Expense, e2: Expense) => {
 };
 
 const getExpensePersonShare = (exp: Expense, personFilter: string): number => {
+  if (!exp || typeof exp.value !== 'number' || isNaN(exp.value)) return 0;
   if (personFilter === 'Todos') return exp.value;
   const targetPerson = personFilter as Person;
 
-  if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
-    const includesMccley = exp.splitWith.includes('Mccley');
-    const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
+  if (exp.costCenter === 'Compartilhado') {
+    const splitArr = Array.isArray(exp.splitWith) ? exp.splitWith : [];
+    const includesMccley = splitArr.includes('Mccley');
+    const divisor = includesMccley ? splitArr.length : splitArr.length + 1;
     if (divisor <= 0) return 0;
+    
     if (targetPerson === 'Mccley') {
       return exp.value / divisor;
-    } else if (exp.splitWith.includes(targetPerson)) {
+    } else if (splitArr.includes(targetPerson)) {
       return exp.value / divisor;
     }
   } else if (exp.costCenter === 'Individual') {
@@ -190,6 +193,9 @@ const getPeopleToPay = (exp: Expense): Person[] => {
 };
 
 const isExpensePaid = (exp: Expense, personFilter: string = 'Todos'): boolean => {
+  if (personFilter === 'Mccley') {
+    return true;
+  }
   if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
     return true;
   }
@@ -201,6 +207,7 @@ const isExpensePaid = (exp: Expense, personFilter: string = 'Todos'): boolean =>
     if (peopleToPay.includes(targetPerson)) {
       return !!exp.receivedFrom?.includes(targetPerson);
     }
+    return false;
   }
 
   return peopleToPay.every(p => exp.receivedFrom?.includes(p));
@@ -733,15 +740,7 @@ export default function McFinanceApp() {
       const matchesCard = reportFilters.card === 'Todas' || exp.card === reportFilters.card;
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
       
-      let belongsToPerson = false;
-      if (reportFilters.person === 'Todos') {
-        belongsToPerson = true;
-      } else {
-        if (exp.costCenter === 'Individual' && exp.individualPerson === reportFilters.person) belongsToPerson = true;
-        if (exp.costCenter === 'Compartilhado' && exp.splitWith?.includes(reportFilters.person as Person)) belongsToPerson = true;
-        if (reportFilters.person === 'Tarcilla' && (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%')) belongsToPerson = true;
-      }
-
+      const belongsToPerson = reportFilters.person === 'Todos' || getExpensePersonShare(exp, reportFilters.person) > 0;
       const matchesPerson = belongsToPerson;
 
       // Status logic: "Paid" if responsible person (or all if 'Todos') is in receivedFrom
@@ -2015,7 +2014,13 @@ export default function McFinanceApp() {
                         {reportFilters.person === 'Todos' ? 'Mccley - Saldo do Mês' : `${reportFilters.person} - Total Selecionado`}
                       </p>
                       <h3 className="text-3xl sm:text-4xl font-bold truncate">
-                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.mccleyReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        {(() => {
+                          const displayVal = reportFilters.person === 'Todos'
+                            ? (totals.reportRevenue || 0) - (totals.mccleyReportTotal || 0)
+                            : (totals.personReportTotal || 0);
+                          const safeVal = isNaN(displayVal) ? 0 : displayVal;
+                          return `R$ ${safeVal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                        })()}
                       </h3>
                     </div>
                     <button 
@@ -2030,11 +2035,11 @@ export default function McFinanceApp() {
                   <div className="space-y-3 pt-4 border-t border-white/20">
                     <div className="flex justify-between items-center text-sm">
                       <span className="font-bold opacity-80">Receita Líquida:</span>
-                      <span className="font-bold">+ R$ {totals.reportRevenue.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                      <span className="font-bold">+ R$ {(totals.reportRevenue || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
                     </div>
                     <div className="flex justify-between items-center text-sm">
                       <span className="font-bold opacity-80">Despesas (Sua parte):</span>
-                      <span className="font-bold">- R$ {totals.mccleyReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                      <span className="font-bold">- R$ {(totals.mccleyReportTotal || 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
                     </div>
                   </div>
                   )}
