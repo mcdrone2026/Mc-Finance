@@ -178,6 +178,34 @@ const getMccleyShare = (exp: Expense): number => {
   return getExpensePersonShare(exp, 'Mccley');
 };
 
+const getPeopleToPay = (exp: Expense): Person[] => {
+  if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
+    return exp.splitWith.filter(p => p !== 'Mccley');
+  } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
+    return [exp.individualPerson];
+  } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
+    return ['Tarcilla'];
+  }
+  return [];
+};
+
+const isExpensePaid = (exp: Expense, personFilter: string = 'Todos'): boolean => {
+  if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
+    return true;
+  }
+  const peopleToPay = getPeopleToPay(exp);
+  if (peopleToPay.length === 0) return true;
+
+  if (personFilter !== 'Todos') {
+    const targetPerson = personFilter as Person;
+    if (peopleToPay.includes(targetPerson)) {
+      return !!exp.receivedFrom?.includes(targetPerson);
+    }
+  }
+
+  return peopleToPay.every(p => exp.receivedFrom?.includes(p));
+};
+
 export default function McFinanceApp() {
   const [activeTab, setActiveTab] = useState<'ledger' | 'expenses' | 'relatorio' | 'receita' | 'emprestimos'>('ledger');
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -716,18 +744,8 @@ export default function McFinanceApp() {
 
       const matchesPerson = belongsToPerson;
 
-      // Status logic: "Paid" if all responsible people are in receivedFrom
-      let isPaid = false;
-      if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
-        const peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
-        isPaid = peopleToPay.length > 0 && peopleToPay.every(p => exp.receivedFrom?.includes(p));
-      } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
-        isPaid = !!exp.receivedFrom?.includes(exp.individualPerson);
-      } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
-        isPaid = !!exp.receivedFrom?.includes('Tarcilla');
-      } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
-        isPaid = true; // Mccley's own individual expenses don't have receivables, treat as paid
-      }
+      // Status logic: "Paid" if responsible person (or all if 'Todos') is in receivedFrom
+      const isPaid = isExpensePaid(exp, reportFilters.person);
 
       let matchesStatus = true;
       if (reportFilters.status === 'Pagas') matchesStatus = isPaid;
@@ -816,39 +834,43 @@ export default function McFinanceApp() {
     }
   };
 
-  const handleToggleAllReceived = (exp: Expense) => {
-    let peopleToPay: Person[] = [];
-    if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
-      peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
-    } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
-      peopleToPay = [exp.individualPerson];
-    } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
-      peopleToPay = ['Tarcilla'];
+  const handleTogglePaymentStatus = (exp: Expense, personFilter: string = reportFilters.person) => {
+    const peopleToPay = getPeopleToPay(exp);
+    if (peopleToPay.length === 0 && !(exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley')) {
+      return;
     }
 
-    if (peopleToPay.length === 0) return;
+    let targetPeople: Person[] = [];
+    if (personFilter !== 'Todos' && peopleToPay.includes(personFilter as Person)) {
+      targetPeople = [personFilter as Person];
+    } else {
+      targetPeople = peopleToPay;
+    }
 
-    const isPaid = peopleToPay.every(p => exp.receivedFrom?.includes(p));
-    let updatedExpense: Expense | null = null;
+    if (targetPeople.length === 0) return;
 
-    const updatedExpenses = expenses.map(e => {
-      if (e.id === exp.id) {
-        if (isPaid) {
-          updatedExpense = { ...e, receivedFrom: (e.receivedFrom || []).filter(p => !peopleToPay.includes(p)) };
-        } else {
-          const newReceived = new Set([...(e.receivedFrom || []), ...peopleToPay]);
-          updatedExpense = { ...e, receivedFrom: Array.from(newReceived) };
-        }
-        return updatedExpense;
-      }
-      return e;
-    });
+    const currentlyPaid = targetPeople.every(p => exp.receivedFrom?.includes(p));
+    let updatedReceived: Person[] = exp.receivedFrom ? [...exp.receivedFrom] : [];
+
+    if (currentlyPaid) {
+      updatedReceived = updatedReceived.filter(p => !targetPeople.includes(p));
+      showToast('Lançamento devolvido para o status Em Aberto!');
+    } else {
+      const set = new Set([...updatedReceived, ...targetPeople]);
+      updatedReceived = Array.from(set);
+      showToast('Lançamento marcado como Pago!');
+    }
+
+    const updatedExpense = { ...exp, receivedFrom: updatedReceived };
+    const updatedExpenses = expenses.map(e => e.id === exp.id ? updatedExpense : e);
 
     setExpenses(updatedExpenses);
+    try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(updatedExpenses)); } catch(e){}
+    saveExpensesToSupabase([updatedExpense]);
+  };
 
-    if (updatedExpense) {
-      saveExpensesToSupabase([updatedExpense]);
-    }
+  const handleToggleAllReceived = (exp: Expense) => {
+    handleTogglePaymentStatus(exp, reportFilters.person);
   };
 
   const exportToPDF = () => {
@@ -2057,18 +2079,7 @@ export default function McFinanceApp() {
                 </div>
               ) : (
                 totals.filteredExpenses.map((exp) => {
-                  let isPaid = false;
-                  if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
-                    const peopleToPay = exp.splitWith.filter(p => p !== 'Mccley');
-                    isPaid = peopleToPay.length > 0 && peopleToPay.every(p => exp.receivedFrom?.includes(p));
-                  } else if (exp.costCenter === 'Individual' && exp.individualPerson && exp.individualPerson !== 'Mccley') {
-                    isPaid = !!exp.receivedFrom?.includes(exp.individualPerson);
-                  } else if (exp.costCenter === 'Lunna 50%' || exp.costCenter === 'Lunna 30%') {
-                    isPaid = !!exp.receivedFrom?.includes('Tarcilla');
-                  } else if (exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley') {
-                    isPaid = true;
-                  }
-
+                  const isPaid = isExpensePaid(exp, reportFilters.person);
                   const hasPeopleToPay = !(exp.costCenter === 'Individual' && exp.individualPerson === 'Mccley');
 
                   return (
