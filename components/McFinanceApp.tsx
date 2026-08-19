@@ -122,6 +122,10 @@ const getBaseDescription = (desc: string) => {
   return (desc || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim().toLowerCase();
 };
 
+const getCleanDescription = (desc: string) => {
+  return (desc || '').replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+};
+
 const getDenominator = (desc: string) => {
   const match = (desc || '').match(/\(\s*\d+\s*\/\s*(\d+)\s*\)/);
   return match ? match[1] : null;
@@ -150,6 +154,7 @@ const getExpensePersonShare = (exp: Expense, personFilter: string): number => {
   if (exp.costCenter === 'Compartilhado' && exp.splitWith) {
     const includesMccley = exp.splitWith.includes('Mccley');
     const divisor = includesMccley ? exp.splitWith.length : exp.splitWith.length + 1;
+    if (divisor <= 0) return 0;
     if (targetPerson === 'Mccley') {
       return exp.value / divisor;
     } else if (exp.splitWith.includes(targetPerson)) {
@@ -167,6 +172,10 @@ const getExpensePersonShare = (exp: Expense, personFilter: string): number => {
     if (targetPerson === 'Tarcilla') return exp.value * 0.3;
   }
   return 0;
+};
+
+const getMccleyShare = (exp: Expense): number => {
+  return getExpensePersonShare(exp, 'Mccley');
 };
 
 export default function McFinanceApp() {
@@ -404,11 +413,19 @@ export default function McFinanceApp() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [applyToFuture, setApplyToFuture] = useState(false);
 
+  // Toast Notification State
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(null), 3500);
+  };
+
   // Filter State for Reports
   const [reportFilters, setReportFilters] = useState<{
     month: number | 'Todos';
     year: number | 'Todos';
     category: string;
+    card: string;
     costCenter: string;
     person: string;
     status: string;
@@ -416,10 +433,62 @@ export default function McFinanceApp() {
     month: new Date().getMonth(),
     year: new Date().getFullYear(),
     category: 'Todas',
+    card: 'Todas',
     costCenter: 'Todos',
     person: 'Todos',
     status: 'Em Aberto' // 'Todas', 'Pagas', 'Em Aberto'
   });
+
+  // PDF Export Modal State
+  const [showPdfModal, setShowPdfModal] = useState(false);
+  const [enableMccleyDeduction, setEnableMccleyDeduction] = useState(false);
+  const [selectedMccleyExpenseIds, setSelectedMccleyExpenseIds] = useState<string[]>([]);
+  const [mccleyScope, setMccleyScope] = useState<'filtered' | 'all'>('filtered');
+
+  // Mccley Open Expenses Computation
+  const mccleyOpenExpenses = useMemo(() => {
+    return expenses.filter(exp => {
+      const share = getExpensePersonShare(exp, 'Mccley');
+      if (share <= 0) return false;
+      const isPaidByMccley = exp.receivedFrom?.includes('Mccley');
+      if (isPaidByMccley) return false;
+
+      if (mccleyScope === 'filtered') {
+        const { year: expYear, month: expMonth } = parseDueDate(exp.dueDate);
+        const matchesMonth = reportFilters.month === 'Todos' || expMonth === reportFilters.month;
+        const matchesYear = reportFilters.year === 'Todos' || expYear === reportFilters.year;
+        return matchesMonth && matchesYear;
+      }
+      return true;
+    });
+  }, [expenses, reportFilters.month, reportFilters.year, mccleyScope]);
+
+  const allMccleyOpenExpensesCount = useMemo(() => {
+    return expenses.filter(exp => {
+      const share = getExpensePersonShare(exp, 'Mccley');
+      return share > 0 && !exp.receivedFrom?.includes('Mccley');
+    }).length;
+  }, [expenses]);
+
+  const openPdfModal = () => {
+    const periodMccleyExpenses = expenses.filter(exp => {
+      const share = getExpensePersonShare(exp, 'Mccley');
+      if (share <= 0) return false;
+      const isPaidByMccley = exp.receivedFrom?.includes('Mccley');
+      if (isPaidByMccley) return false;
+
+      const { year: expYear, month: expMonth } = parseDueDate(exp.dueDate);
+      const matchesMonth = reportFilters.month === 'Todos' || expMonth === reportFilters.month;
+      const matchesYear = reportFilters.year === 'Todos' || expYear === reportFilters.year;
+      return matchesMonth && matchesYear;
+    });
+
+    const initialIds = periodMccleyExpenses.map(e => e.id);
+    setSelectedMccleyExpenseIds(initialIds);
+    setEnableMccleyDeduction(initialIds.length > 0);
+    setMccleyScope('filtered');
+    setShowPdfModal(true);
+  };
 
   // Form State
   const initialFormState: Partial<Expense> = {
@@ -633,6 +702,7 @@ export default function McFinanceApp() {
       const matchesMonth = (reportFilters.month === 'Todos' || expMonth === reportFilters.month) && 
                            (reportFilters.year === 'Todos' || expYear === reportFilters.year);
       const matchesCategory = reportFilters.category === 'Todas' || exp.category === reportFilters.category;
+      const matchesCard = reportFilters.card === 'Todas' || exp.card === reportFilters.card;
       const matchesCostCenter = reportFilters.costCenter === 'Todos' || exp.costCenter === reportFilters.costCenter;
       
       let belongsToPerson = false;
@@ -663,11 +733,15 @@ export default function McFinanceApp() {
       if (reportFilters.status === 'Pagas') matchesStatus = isPaid;
       if (reportFilters.status === 'Em Aberto') matchesStatus = !isPaid;
 
-      return matchesMonth && matchesCategory && matchesCostCenter && matchesPerson && matchesStatus;
+      return matchesMonth && matchesCategory && matchesCard && matchesCostCenter && matchesPerson && matchesStatus;
     }).map(exp => ({ ...exp, groupId: getGroupId(exp) }));
 
     const reportTotal = filteredExpenses.reduce((acc, exp) => {
       return acc + getExpensePersonShare(exp, reportFilters.person);
+    }, 0);
+
+    const mccleyReportTotal = filteredExpenses.reduce((acc, exp) => {
+      return acc + getMccleyShare(exp);
     }, 0);
 
     const personReportTotal = reportTotal;
@@ -693,6 +767,7 @@ export default function McFinanceApp() {
       filteredExpenses,
       reportTotal,
       personReportTotal,
+      mccleyReportTotal,
       reportRevenue,
       reportByCategory
     };
@@ -801,7 +876,7 @@ export default function McFinanceApp() {
     const tableColumn = ['Descrição', 'Vencimento', 'Vlr da Despesa', 'Centro de Custo', 'Valor (R$)'];
     let totalRawValue = 0;
 
-    const tableRows = totals.filteredExpenses.map(exp => {
+    const tableRows: any[] = totals.filteredExpenses.map(exp => {
       const share = getExpensePersonShare(exp, reportFilters.person);
       totalRawValue += exp.value;
       return [
@@ -813,13 +888,39 @@ export default function McFinanceApp() {
       ];
     });
 
+    const isDeductionActive = enableMccleyDeduction && selectedMccleyExpenseIds.length > 0;
+    const selectedMccleyExpenses = mccleyOpenExpenses.filter(e => selectedMccleyExpenseIds.includes(e.id));
+    const totalDeductions = selectedMccleyExpenses.reduce((acc, e) => acc + getExpensePersonShare(e, 'Mccley'), 0);
+
     tableRows.push([
-      'TOTAL',
+      isDeductionActive ? 'TOTAL DA DESPESA' : 'TOTAL',
       '',
       totalRawValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
       '',
       totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     ]);
+
+    if (isDeductionActive) {
+      selectedMccleyExpenses.forEach(mccExp => {
+        const share = getExpensePersonShare(mccExp, 'Mccley');
+        tableRows.push([
+          `(-) Abatimento: ${mccExp.description}`,
+          formatDateBR(mccExp.dueDate),
+          `(-) R$ ${mccExp.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          mccExp.costCenter,
+          `(-) R$ ${share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        ]);
+      });
+
+      const finalTotal = totals.reportTotal - totalDeductions;
+      tableRows.push([
+        'VALOR TOTAL APÓS ABATIMENTO',
+        '',
+        '',
+        '',
+        `R$ ${finalTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      ]);
+    }
 
     autoTable(doc, {
       head: [tableColumn],
@@ -830,52 +931,84 @@ export default function McFinanceApp() {
       alternateRowStyles: { fillColor: [245, 245, 245] },
       margin: { top: 45 },
       didParseCell: function(data: any) {
-        if (data.section === 'body' && data.row.index === tableRows.length - 1) {
-          data.cell.styles.fontStyle = 'bold';
-          data.cell.styles.fillColor = [230, 230, 230];
+        if (data.section === 'body') {
+          const rowText = String(tableRows[data.row.index]?.[0] || '');
+          const isTotal = rowText === 'TOTAL' || rowText === 'TOTAL DA DESPESA';
+          const isDeduction = rowText.startsWith('(-)');
+          const isFinalTotal = rowText === 'VALOR TOTAL APÓS ABATIMENTO';
+
+          if (isTotal) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fillColor = [230, 230, 230];
+          } else if (isDeduction) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.textColor = [220, 38, 38]; // Red (-)
+            data.cell.styles.fillColor = [254, 242, 242]; // Light red tint
+          } else if (isFinalTotal) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fontSize = 11;
+            data.cell.styles.textColor = [5, 150, 105]; // Emerald
+            data.cell.styles.fillColor = [209, 250, 229]; // Light emerald tint
+          }
         }
       }
     });
 
     doc.save(`relatorio_financeiro_${new Date().toISOString().split('T')[0]}.pdf`);
+    setShowPdfModal(false);
   };
 
   const handleAddExpense = (e: React.FormEvent) => {
     e.preventDefault();
     
     let itemsToSave: Expense[] = [];
+    const baseVal = Number(formData.value) || 0;
+    const isEditing = Boolean(editingId);
 
-    if (editingId) {
+    // Determinar a quantidade de parcelas N
+    let instCount = 1;
+    if (formData.installments && formData.installments !== 'À vista') {
+      const parsed = parseInt(String(formData.installments).replace(/\D/g, ''), 10);
+      if (!isNaN(parsed) && parsed > 0) instCount = parsed;
+    }
+
+    const isRecurring = Boolean(formData.isRecurring);
+    const recurringCount = formData.recurringCount || 2;
+
+    if (isEditing) {
       const originalExpense = expenses.find(exp => exp.id === editingId);
-      if (originalExpense && applyToFuture) {
+      if (originalExpense) {
         const groupItems = expenses.filter(exp => isSameSeries(exp, originalExpense))
                                    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
         const rootExp = groupItems[0] || originalExpense;
         const groupId = rootExp.groupId || originalExpense.groupId || Math.random().toString(36).substr(2, 9);
         const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || rootExp.dueDate);
-        const rawBaseDesc = (formData.description || rootExp.description).replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g, '').trim();
+        const rawBaseDesc = getCleanDescription(formData.description || rootExp.description);
 
-        let newCount = groupItems.length;
-        if (formData.installments && formData.installments !== 'À vista') {
-          const parsed = parseInt(String(formData.installments).replace(/\D/g, ''), 10);
-          if (!isNaN(parsed) && parsed > 0) newCount = parsed;
-        } else if (formData.isRecurring && formData.recurringCount) {
-          newCount = formData.recurringCount;
-        } else if (formData.installments === 'À vista') {
-          newCount = 1;
+        let targetCount = 1;
+        if (instCount > 1) {
+          targetCount = instCount;
+        } else if (isRecurring) {
+          targetCount = recurringCount;
+        }
+
+        // Valor por parcela ou fixo mensal
+        let monthlyValue = baseVal;
+        if (instCount > 1) {
+          monthlyValue = Math.round((baseVal / instCount) * 100) / 100;
         }
 
         const itemsToKeepAndUpdate: Expense[] = [];
         const itemsToCreate: Expense[] = [];
         const idsToDeleteFromDB: string[] = [];
 
-        const updateLimit = Math.min(groupItems.length, newCount);
+        const updateLimit = Math.min(groupItems.length, targetCount);
         for (let index = 0; index < updateLimit; index++) {
           const exp = groupItems[index];
           let updatedDesc = rawBaseDesc;
-          if (newCount > 1) {
-            updatedDesc = `${rawBaseDesc} (${index + 1}/${newCount})`;
+          if (instCount > 1) {
+            updatedDesc = `${rawBaseDesc} (${index + 1}/${instCount})`;
           }
 
           let m = baseMonth + index;
@@ -887,31 +1020,41 @@ export default function McFinanceApp() {
           const formattedDay = String(actualDay).padStart(2, '0');
           const updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
 
+          // Ajuste de centavos na primeira parcela se necessário
+          let val = monthlyValue;
+          if (instCount > 1 && index === 0) {
+            val = Math.round((baseVal - (monthlyValue * (instCount - 1))) * 100) / 100;
+          }
+
           itemsToKeepAndUpdate.push({
             ...exp,
             groupId,
             dueDate: updatedDueDate,
-            installments: newCount === 1 ? 'À vista' : `${newCount}x`,
-            isRecurring: Boolean(formData.isRecurring),
+            installments: instCount === 1 ? 'À vista' : `${instCount}x`,
+            isRecurring: isRecurring,
             costCenter: formData.costCenter as CostCenter,
-            splitWith: formData.splitWith,
-            individualPerson: formData.individualPerson,
+            splitWith: formData.costCenter === 'Compartilhado' ? (formData.splitWith || []) : undefined,
+            individualPerson: formData.costCenter === 'Individual' ? formData.individualPerson : undefined,
             description: updatedDesc,
-            value: formData.value || exp.value,
+            value: val,
             category: formData.category as Category,
             card: formData.card as Card,
           });
         }
 
-        if (newCount < groupItems.length) {
-          for (let index = newCount; index < groupItems.length; index++) {
+        if (targetCount < groupItems.length) {
+          for (let index = targetCount; index < groupItems.length; index++) {
             idsToDeleteFromDB.push(groupItems[index].id);
           }
         }
 
-        if (newCount > groupItems.length) {
-          for (let index = groupItems.length; index < newCount; index++) {
-            let updatedDesc = `${rawBaseDesc} (${index + 1}/${newCount})`;
+        if (targetCount > groupItems.length) {
+          for (let index = groupItems.length; index < targetCount; index++) {
+            let updatedDesc = rawBaseDesc;
+            if (instCount > 1) {
+              updatedDesc = `${rawBaseDesc} (${index + 1}/${instCount})`;
+            }
+
             let m = baseMonth + index;
             let y = baseYear + Math.floor(m / 12);
             m = m % 12;
@@ -921,18 +1064,20 @@ export default function McFinanceApp() {
             const formattedDay = String(actualDay).padStart(2, '0');
             const updatedDueDate = `${y}-${formattedMonth}-${formattedDay}`;
 
+            let val = monthlyValue;
+
             itemsToCreate.push({
               ...formData as Expense,
               id: Math.random().toString(36).substr(2, 9),
               groupId,
               dueDate: updatedDueDate,
-              installments: `${newCount}x`,
-              isRecurring: Boolean(formData.isRecurring),
+              installments: instCount === 1 ? 'À vista' : `${instCount}x`,
+              isRecurring: isRecurring,
               costCenter: formData.costCenter as CostCenter,
-              splitWith: formData.splitWith,
-              individualPerson: formData.individualPerson,
+              splitWith: formData.costCenter === 'Compartilhado' ? (formData.splitWith || []) : undefined,
+              individualPerson: formData.costCenter === 'Individual' ? formData.individualPerson : undefined,
               description: updatedDesc,
-              value: formData.value || rootExp.value,
+              value: val,
               category: formData.category as Category,
               card: formData.card as Card,
               createdAt: Date.now()
@@ -949,23 +1094,65 @@ export default function McFinanceApp() {
         ];
 
         setExpenses(finalExpenses);
+        try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(finalExpenses)); } catch(e){}
 
         itemsToSave = [...itemsToKeepAndUpdate, ...itemsToCreate];
         if (idsToDeleteFromDB.length > 0) {
           deleteExpensesFromSupabase(idsToDeleteFromDB);
         }
-      } else {
-        const updated = { ...expenses.find(exp => exp.id === editingId)!, ...formData as Expense };
-        itemsToSave = [updated];
-        setExpenses(expenses.map(exp => exp.id === editingId ? updated : exp));
+        showToast('Lançamento raiz e parcelas atualizados com sucesso!');
       }
       setEditingId(null);
       setApplyToFuture(false);
-    } else if (formData.isRecurring) {
+    } else if (instCount > 1) {
+      // NOVO LANÇAMENTO PARCELADO
       const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || new Date().toISOString().split('T')[0]);
       const newEntries: Expense[] = [];
-      const count = formData.recurringCount || 2;
       const groupId = Math.random().toString(36).substr(2, 9);
+      const rawBaseDesc = getCleanDescription(formData.description || '');
+      const monthlyValue = Math.round((baseVal / instCount) * 100) / 100;
+      
+      for (let i = 0; i < instCount; i++) {
+        let m = baseMonth + i;
+        let y = baseYear + Math.floor(m / 12);
+        m = m % 12;
+        
+        const daysInMonth = new Date(y, m + 1, 0).getDate();
+        const actualDay = Math.min(baseDay, daysInMonth);
+        
+        const formattedMonth = String(m + 1).padStart(2, '0');
+        const formattedDay = String(actualDay).padStart(2, '0');
+        const dueDateStr = `${y}-${formattedMonth}-${formattedDay}`;
+
+        let val = monthlyValue;
+        if (i === 0) {
+          val = Math.round((baseVal - (monthlyValue * (instCount - 1))) * 100) / 100;
+        }
+
+        newEntries.push({
+          ...formData as Expense,
+          id: Math.random().toString(36).substr(2, 9),
+          groupId,
+          dueDate: dueDateStr,
+          description: `${rawBaseDesc} (${i + 1}/${instCount})`,
+          value: val,
+          installments: `${instCount}x`,
+          receivedFrom: [],
+          createdAt: Date.now()
+        });
+      }
+      itemsToSave = newEntries;
+      const updatedAll = [...newEntries, ...expenses];
+      setExpenses(updatedAll);
+      try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(updatedAll)); } catch(e){}
+      showToast(`Transação de R$ ${baseVal.toLocaleString('pt-BR', {minimumFractionDigits: 2})} em ${instCount}x confirmada com sucesso!`);
+    } else if (isRecurring) {
+      // NOVO LANÇAMENTO RECORRENTE (ASSINATURA)
+      const { year: baseYear, month: baseMonth, day: baseDay } = parseDueDate(formData.dueDate || new Date().toISOString().split('T')[0]);
+      const newEntries: Expense[] = [];
+      const count = recurringCount;
+      const groupId = Math.random().toString(36).substr(2, 9);
+      const rawBaseDesc = getCleanDescription(formData.description || '');
       
       for (let i = 0; i < count; i++) {
         let m = baseMonth + i;
@@ -984,21 +1171,33 @@ export default function McFinanceApp() {
           id: Math.random().toString(36).substr(2, 9),
           groupId,
           dueDate: dueDateStr,
+          description: rawBaseDesc,
+          value: baseVal,
           receivedFrom: [],
           createdAt: Date.now()
         });
       }
       itemsToSave = newEntries;
-      setExpenses([...newEntries, ...expenses]);
+      const updatedAll = [...newEntries, ...expenses];
+      setExpenses(updatedAll);
+      try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(updatedAll)); } catch(e){}
+      showToast(`Assinatura recorrente salva com sucesso para ${count} meses!`);
     } else {
+      // NOVO LANÇAMENTO À VISTA
+      const rawBaseDesc = getCleanDescription(formData.description || '');
       const newExpense: Expense = {
         ...formData as Expense,
         id: Math.random().toString(36).substr(2, 9),
+        description: rawBaseDesc,
+        value: baseVal,
         receivedFrom: [],
         createdAt: Date.now()
       };
       itemsToSave = [newExpense];
-      setExpenses([newExpense, ...expenses]);
+      const updatedAll = [newExpense, ...expenses];
+      setExpenses(updatedAll);
+      try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(updatedAll)); } catch(e){}
+      showToast('Transação confirmada com sucesso!');
     }
 
     if (itemsToSave.length > 0) {
@@ -1015,10 +1214,21 @@ export default function McFinanceApp() {
                                     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 
     const rootExpense = seriesExpenses.length > 0 ? seriesExpenses[0] : expense;
+    const baseDesc = getCleanDescription(rootExpense.description);
 
-    setFormData(rootExpense);
+    let totalVal = rootExpense.value;
+    const instCount = parseInt(String(rootExpense.installments).replace(/\D/g, ''), 10);
+    if (!isNaN(instCount) && instCount > 1 && seriesExpenses.length > 1) {
+      totalVal = seriesExpenses.reduce((acc, curr) => acc + curr.value, 0);
+    }
+
+    setFormData({
+      ...rootExpense,
+      description: baseDesc,
+      value: Math.round(totalVal * 100) / 100
+    });
     setEditingId(rootExpense.id);
-    setApplyToFuture(false);
+    setApplyToFuture(true);
     setActiveTab('expenses');
   };
 
@@ -1026,17 +1236,17 @@ export default function McFinanceApp() {
     const originalExpense = expenses.find(exp => exp.id === id);
     if (!originalExpense) return;
 
-    let idsToDelete: string[] = [id];
+    const seriesExpenses = expenses.filter(exp => isSameSeries(exp, originalExpense));
+    const idsToDelete = seriesExpenses.map(exp => exp.id);
 
-    if (applyToFuture) {
-      idsToDelete = expenses.filter(exp => isSameSeries(exp, originalExpense)).map(exp => exp.id);
-    }
-
-    setExpenses(expenses.filter(exp => !idsToDelete.includes(exp.id)));
+    const updatedExpenses = expenses.filter(exp => !idsToDelete.includes(exp.id));
+    setExpenses(updatedExpenses);
+    try { localStorage.setItem('mc_finance_expenses_backup', JSON.stringify(updatedExpenses)); } catch(e){}
     deleteExpensesFromSupabase(idsToDelete);
 
     setShowDeleteConfirm(null);
     setApplyToFuture(false);
+    showToast('Lançamento e parcelas excluídos com sucesso!');
   };
 
   const togglePersonInSplit = (person: Person) => {
@@ -1122,6 +1332,21 @@ export default function McFinanceApp() {
 
   return (
     <div className="min-h-screen bg-[#121212] text-white font-sans pb-24 relative overflow-hidden">
+      {/* Toast Notification Banner */}
+      <AnimatePresence>
+        {toastMsg && (
+          <motion.div
+            initial={{ opacity: 0, y: -50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.9 }}
+            className="fixed top-6 left-1/2 -translate-x-1/2 z-[150] bg-[#064E3B] border border-[#10B981] text-[#10B981] px-6 py-3.5 rounded-2xl shadow-2xl backdrop-blur-xl flex items-center gap-3 font-bold text-sm"
+          >
+            <CheckCircle className="w-5 h-5 text-[#10B981]" />
+            <span>{toastMsg}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Background Glow Effects */}
       <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-[#10B981]/10 rounded-full blur-[120px] pointer-events-none" />
       <div className="absolute bottom-0 right-1/4 w-[500px] h-[500px] bg-blue-900/10 rounded-full blur-[120px] pointer-events-none" />
@@ -1499,6 +1724,18 @@ export default function McFinanceApp() {
                           <option key={i} value={`${i + 1}x`}>{i + 1}x</option>
                         ))}
                       </select>
+                      {(() => {
+                        const instCount = parseInt(String(formData.installments).replace(/\D/g, ''), 10);
+                        if (instCount > 1 && formData.value) {
+                          const valPerInst = (formData.value / instCount).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                          return (
+                            <p className="text-xs text-[#10B981] font-semibold pt-1">
+                              {instCount}x de R$ {valPerInst} <span className="text-gray-400 font-normal">(Total: R$ {formData.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})</span>
+                            </p>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -1659,7 +1896,7 @@ export default function McFinanceApp() {
 
             {/* Filters */}
             <div className="bg-[#171717] p-4 sm:p-6 rounded-3xl border border-white/5 space-y-4 sm:space-y-6">
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 sm:gap-4">
                 <div className="space-y-1.5 sm:space-y-2">
                   <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Mês</p>
                   <select 
@@ -1695,6 +1932,17 @@ export default function McFinanceApp() {
                   >
                     <option value="Todas">Todas</option>
                     {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1.5 sm:space-y-2">
+                  <p className="text-[10px] uppercase tracking-widest font-bold text-gray-500">Pagamento</p>
+                  <select 
+                    className="w-full bg-[#262626] border-none rounded-xl p-3 text-xs sm:text-sm text-gray-300 outline-none"
+                    value={reportFilters.card}
+                    onChange={(e) => setReportFilters({ ...reportFilters, card: e.target.value })}
+                  >
+                    <option value="Todas">Todos</option>
+                    {CARDS.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1.5 sm:space-y-2">
@@ -1737,7 +1985,7 @@ export default function McFinanceApp() {
             {/* Dashboard Visual */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
               {/* Balance Summary Card */}
-              <div className={`p-6 sm:p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${reportFilters.person === 'Todos' ? (totals.reportRevenue - totals.personReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20') : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/20'}`}>
+              <div className={`p-6 sm:p-8 rounded-3xl text-white shadow-lg relative overflow-hidden flex flex-col justify-between ${reportFilters.person === 'Todos' ? (totals.reportRevenue - totals.mccleyReportTotal >= 0 ? 'bg-gradient-to-br from-[#10B981] to-[#059669] shadow-emerald-900/20' : 'bg-gradient-to-br from-red-500 to-red-700 shadow-red-900/20') : 'bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/20'}`}>
                 <div className="relative z-10">
                   <div className="flex justify-between items-start mb-6 gap-2">
                     <div className="flex-1 min-w-0">
@@ -1745,11 +1993,11 @@ export default function McFinanceApp() {
                         {reportFilters.person === 'Todos' ? 'Mccley - Saldo do Mês' : `${reportFilters.person} - Total Selecionado`}
                       </p>
                       <h3 className="text-3xl sm:text-4xl font-bold truncate">
-                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.personReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        R$ {(reportFilters.person === 'Todos' ? totals.reportRevenue - totals.mccleyReportTotal : totals.personReportTotal).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </h3>
                     </div>
                     <button 
-                      onClick={exportToPDF}
+                      onClick={openPdfModal}
                       className="flex items-center gap-2 bg-black/20 hover:bg-black/40 text-white px-3 sm:px-4 py-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors backdrop-blur-sm shrink-0"
                     >
                       <Download className="w-4 h-4" /> <span className="hidden sm:inline">PDF</span>
@@ -1764,7 +2012,7 @@ export default function McFinanceApp() {
                     </div>
                     <div className="flex justify-between items-center text-sm">
                       <span className="font-bold opacity-80">Despesas (Sua parte):</span>
-                      <span className="font-bold">- R$ {totals.personReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
+                      <span className="font-bold">- R$ {totals.mccleyReportTotal.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
                     </div>
                   </div>
                   )}
@@ -2522,6 +2770,199 @@ export default function McFinanceApp() {
                 </button>
               </div>
             </motion.div>
+          </div>
+        )}
+
+        {/* PDF Export Modal */}
+        {showPdfModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in overflow-y-auto">
+            <div className="bg-[#171717] border border-white/10 rounded-3xl w-full max-w-2xl p-6 sm:p-8 space-y-6 shadow-2xl text-white my-8">
+              {/* Modal Header */}
+              <div className="flex justify-between items-center border-b border-white/10 pb-4">
+                <div>
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <Download className="w-5 h-5 text-[#10B981]" />
+                    Exportar Relatório PDF
+                  </h3>
+                  <p className="text-xs text-gray-400">Configure as opções antes de gerar o PDF</p>
+                </div>
+                <button 
+                  onClick={() => setShowPdfModal(false)}
+                  className="p-2 rounded-xl text-gray-400 hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Info summary */}
+              <div className="bg-[#262626] p-4 rounded-2xl border border-white/5 flex flex-wrap justify-between items-center gap-4 text-xs">
+                <div>
+                  <span className="text-gray-400 font-medium">Pessoa: </span>
+                  <span className="font-bold text-white">{reportFilters.person}</span>
+                </div>
+                <div>
+                  <span className="text-gray-400 font-medium">Filtro: </span>
+                  <span className="font-bold text-white">
+                    {reportFilters.month === 'Todos' ? 'Todos' : ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'][reportFilters.month as number]} / {reportFilters.year}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-gray-400 font-medium">Lançamentos: </span>
+                  <span className="font-bold text-white">{totals.filteredExpenses.length}</span>
+                </div>
+              </div>
+
+              {/* Option to deduct Mccley's open expenses */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
+                  <div>
+                    <p className="font-bold text-sm">Abater Despesas em Aberto do Mccley</p>
+                    <p className="text-xs text-gray-400">Deduz despesas em aberto do Mccley do valor total da despesa da pessoa selecionada</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={enableMccleyDeduction} 
+                      onChange={(e) => setEnableMccleyDeduction(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#10B981]"></div>
+                  </label>
+                </div>
+
+                {enableMccleyDeduction && (
+                  <div className="space-y-3 bg-[#262626]/30 p-4 rounded-2xl border border-white/5">
+                    <div className="flex flex-wrap justify-between items-center gap-2">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setMccleyScope('filtered')}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors ${mccleyScope === 'filtered' ? 'bg-[#10B981] text-black' : 'bg-[#262626] text-gray-400 hover:text-white'}`}
+                        >
+                          Período Filtrado ({mccleyOpenExpenses.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setMccleyScope('all')}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors ${mccleyScope === 'all' ? 'bg-[#10B981] text-black' : 'bg-[#262626] text-gray-400 hover:text-white'}`}
+                        >
+                          Todas em Aberto ({allMccleyOpenExpensesCount})
+                        </button>
+                      </div>
+
+                      {mccleyOpenExpenses.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (selectedMccleyExpenseIds.length === mccleyOpenExpenses.length) {
+                              setSelectedMccleyExpenseIds([]);
+                            } else {
+                              setSelectedMccleyExpenseIds(mccleyOpenExpenses.map(e => e.id));
+                            }
+                          }}
+                          className="text-xs text-[#10B981] hover:underline font-bold"
+                        >
+                          {selectedMccleyExpenseIds.length === mccleyOpenExpenses.length ? 'Desmarcar Todas' : 'Selecionar Todas'}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Expenses List */}
+                    {mccleyOpenExpenses.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-gray-500 italic">
+                        Nenhuma despesa em aberto do Mccley encontrada para o escopo selecionado.
+                      </div>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                        {mccleyOpenExpenses.map(exp => {
+                          const share = getExpensePersonShare(exp, 'Mccley');
+                          const isChecked = selectedMccleyExpenseIds.includes(exp.id);
+                          return (
+                            <label 
+                              key={exp.id} 
+                              className={`flex items-center justify-between p-3 rounded-xl border transition-colors cursor-pointer text-xs ${isChecked ? 'bg-[#10B981]/10 border-[#10B981]/40' : 'bg-[#262626]/60 border-white/5 hover:border-white/10'}`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <input 
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => {
+                                    if (isChecked) {
+                                      setSelectedMccleyExpenseIds(selectedMccleyExpenseIds.filter(id => id !== exp.id));
+                                    } else {
+                                      setSelectedMccleyExpenseIds([...selectedMccleyExpenseIds, exp.id]);
+                                    }
+                                  }}
+                                  className="w-4 h-4 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
+                                />
+                                <div className="min-w-0">
+                                  <p className="font-bold truncate text-white">{exp.description}</p>
+                                  <p className="text-[10px] text-gray-400">{formatDateBR(exp.dueDate)} • {exp.costCenter}</p>
+                                </div>
+                              </div>
+                              <span className="font-bold text-red-400 whitespace-nowrap ml-2">
+                                (-) R$ {share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Financial Preview Box */}
+              {(() => {
+                const selectedMccleyExpenses = mccleyOpenExpenses.filter(e => selectedMccleyExpenseIds.includes(e.id));
+                const totalDeductions = selectedMccleyExpenses.reduce((acc, e) => acc + getExpensePersonShare(e, 'Mccley'), 0);
+                const finalTotal = enableMccleyDeduction ? totals.personReportTotal - totalDeductions : totals.personReportTotal;
+
+                return (
+                  <div className="bg-[#262626] p-5 rounded-2xl border border-white/10 space-y-3">
+                    <div className="flex justify-between items-center text-xs text-gray-300">
+                      <span>Valor Total da Despesa ({reportFilters.person}):</span>
+                      <span className="font-bold">R$ {totals.personReportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                    </div>
+                    
+                    {enableMccleyDeduction && selectedMccleyExpenses.length > 0 && (
+                      <div className="flex justify-between items-center text-xs text-red-400 font-medium">
+                        <span>(-) Abatimentos de Mccley ({selectedMccleyExpenses.length} despesa{selectedMccleyExpenses.length > 1 ? 's' : ''}):</span>
+                        <span className="font-bold text-red-500">
+                          - R$ {totalDeductions.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="pt-3 border-t border-white/10 flex justify-between items-center">
+                      <span className="text-sm font-bold text-white">Valor Total Após Abatimento:</span>
+                      <span className="text-xl font-bold text-[#10B981]">
+                        R$ {finalTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Modal Actions */}
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPdfModal(false)}
+                  className="px-5 py-2.5 rounded-xl bg-[#262626] hover:bg-[#333333] text-gray-300 text-xs font-bold transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={exportToPDF}
+                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-[#10B981] to-[#059669] hover:from-[#059669] hover:to-[#047857] text-white text-xs font-bold transition-colors flex items-center gap-2 shadow-lg shadow-emerald-900/30"
+                >
+                  <Download className="w-4 h-4" />
+                  Gerar PDF
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </AnimatePresence>
