@@ -280,18 +280,29 @@ export default function McFinanceApp() {
         if (revData) {
           const groupedRevenues: Record<string, MonthlyRevenue> = {};
           revData.forEach(r => {
-            const key = `${r.month}-${r.year}`;
-            if (!groupedRevenues[key]) {
-              groupedRevenues[key] = { id: key, month: r.month, year: r.year, salary: 0, commission: 0, dsr: 0, grossSalary: 0, netSalary: 0, value: 0 };
+            let mNum = typeof r.month === 'number' ? r.month : parseInt(r.month, 10);
+            if (isNaN(mNum)) {
+              const monthNamesLower = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+              mNum = monthNamesLower.indexOf(String(r.month).toLowerCase());
             }
-            if (r.source === 'salary') groupedRevenues[key].salary = r.amount;
-            if (r.source === 'commission') groupedRevenues[key].commission = r.amount;
-            if (r.source === 'dsr') groupedRevenues[key].dsr = r.amount;
-            if (r.source === 'grossSalary') groupedRevenues[key].grossSalary = r.amount;
-            if (r.source === 'netSalary') groupedRevenues[key].netSalary = r.amount;
-            if (r.source === 'value') groupedRevenues[key].value = r.amount;
+            if (mNum < 0 || mNum > 11) return;
+            const yNum = Number(r.year);
+
+            const key = `${mNum}-${yNum}`;
+            if (!groupedRevenues[key]) {
+              groupedRevenues[key] = { id: key, month: mNum, year: yNum, salary: 0, commission: 0, dsr: 0, grossSalary: 0, netSalary: 0, value: 0 };
+            }
+            const amt = Number(r.amount) || 0;
+            if (r.source === 'salary') groupedRevenues[key].salary = amt;
+            if (r.source === 'commission') groupedRevenues[key].commission = amt;
+            if (r.source === 'dsr') groupedRevenues[key].dsr = amt;
+            if (r.source === 'grossSalary') groupedRevenues[key].grossSalary = amt;
+            if (r.source === 'netSalary') groupedRevenues[key].netSalary = amt;
+            if (r.source === 'value') groupedRevenues[key].value = amt;
           });
-          setRevenues(Object.values(groupedRevenues));
+          const parsedRev = Object.values(groupedRevenues);
+          setRevenues(parsedRev);
+          try { localStorage.setItem('mc_finance_revenues_backup', JSON.stringify(parsedRev)); } catch(e){}
         }
 
         if (loanData) {
@@ -390,12 +401,12 @@ export default function McFinanceApp() {
       setIsSyncing(true);
       const rows = revenuesToSave.flatMap(r => {
         const result = [];
-        if (r.salary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-salary`, month: r.month, year: r.year, person: 'Mccley', source: 'salary', amount: r.salary });
-        if (r.commission !== undefined) result.push({ id: `rev-${r.month}-${r.year}-commission`, month: r.month, year: r.year, person: 'Mccley', source: 'commission', amount: r.commission });
-        if (r.dsr !== undefined) result.push({ id: `rev-${r.month}-${r.year}-dsr`, month: r.month, year: r.year, person: 'Mccley', source: 'dsr', amount: r.dsr });
-        if (r.grossSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-grossSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'grossSalary', amount: r.grossSalary });
-        if (r.netSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-netSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'netSalary', amount: r.netSalary });
-        if (r.value !== undefined) result.push({ id: `rev-${r.month}-${r.year}-value`, month: r.month, year: r.year, person: 'Mccley', source: 'value', amount: r.value });
+        if (r.salary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-salary`, month: r.month, year: r.year, person: 'Mccley', source: 'salary', amount: Number(r.salary) || 0 });
+        if (r.commission !== undefined) result.push({ id: `rev-${r.month}-${r.year}-commission`, month: r.month, year: r.year, person: 'Mccley', source: 'commission', amount: Number(r.commission) || 0 });
+        if (r.dsr !== undefined) result.push({ id: `rev-${r.month}-${r.year}-dsr`, month: r.month, year: r.year, person: 'Mccley', source: 'dsr', amount: Number(r.dsr) || 0 });
+        if (r.grossSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-grossSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'grossSalary', amount: Number(r.grossSalary) || 0 });
+        if (r.netSalary !== undefined) result.push({ id: `rev-${r.month}-${r.year}-netSalary`, month: r.month, year: r.year, person: 'Mccley', source: 'netSalary', amount: Number(r.netSalary) || 0 });
+        if (r.value !== undefined) result.push({ id: `rev-${r.month}-${r.year}-value`, month: r.month, year: r.year, person: 'Mccley', source: 'value', amount: Number(r.value) || 0 });
         return result;
       });
       const { error } = await supabase.from('revenues').upsert(rows);
@@ -414,8 +425,26 @@ export default function McFinanceApp() {
   const deleteRevenuesFromSupabase = async (month: number, year: number) => {
     try {
       setIsSyncing(true);
-      const { error } = await supabase.from('revenues').delete().eq('month', month).eq('year', year);
-      if (error) throw error;
+      const mNum = Number(month);
+      const yNum = Number(year);
+      const monthNames = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+      const monthName = monthNames[mNum] || '';
+
+      await Promise.all([
+        supabase.from('revenues').delete().eq('month', mNum).eq('year', yNum),
+        supabase.from('revenues').delete().eq('month', String(mNum)).eq('year', yNum),
+        supabase.from('revenues').delete().eq('month', String(mNum)).eq('year', String(yNum)),
+        monthName ? supabase.from('revenues').delete().eq('month', monthName).eq('year', yNum) : Promise.resolve(),
+        supabase.from('revenues').delete().in('id', [
+          `rev-${mNum}-${yNum}-salary`,
+          `rev-${mNum}-${yNum}-commission`,
+          `rev-${mNum}-${yNum}-dsr`,
+          `rev-${mNum}-${yNum}-grossSalary`,
+          `rev-${mNum}-${yNum}-netSalary`,
+          `rev-${mNum}-${yNum}-value`
+        ])
+      ]);
+
       setSyncStatus('synced');
       setSyncErrorMsg(null);
     } catch (error: any) {
@@ -2306,15 +2335,18 @@ export default function McFinanceApp() {
                   };
                   
                   const existingIdx = revenues.findIndex(r => r.month === newRevenue.month && r.year === newRevenue.year);
+                  let updatedRevenues: MonthlyRevenue[] = [];
                   if (existingIdx >= 0) {
-                    const newRevenues = [...revenues];
-                    newRevenues[existingIdx] = { ...newRevenues[existingIdx], ...newRevenue };
-                    setRevenues(newRevenues);
+                    updatedRevenues = [...revenues];
+                    updatedRevenues[existingIdx] = { ...updatedRevenues[existingIdx], ...newRevenue };
                   } else {
-                    setRevenues([...revenues, newRevenue]);
+                    updatedRevenues = [...revenues, newRevenue];
                   }
+                  setRevenues(updatedRevenues);
+                  try { localStorage.setItem('mc_finance_revenues_backup', JSON.stringify(updatedRevenues)); } catch(e){}
                   
                   saveRevenuesToSupabase([newRevenue]);
+                  showToast('Lançamento de receita salvo com sucesso!');
                   
                   setRevenueFormData({
                     ...revenueFormData,
@@ -2364,8 +2396,11 @@ export default function McFinanceApp() {
                           <Edit2 className="w-5 h-5" />
                         </button>
                         <button onClick={() => {
-                          setRevenues(revenues.filter(rev => rev.id !== r.id));
+                          const updated = revenues.filter(rev => !(rev.month === r.month && rev.year === r.year));
+                          setRevenues(updated);
+                          try { localStorage.setItem('mc_finance_revenues_backup', JSON.stringify(updated)); } catch(e){}
                           deleteRevenuesFromSupabase(r.month, r.year);
+                          showToast('Lançamento de receita excluído com sucesso!');
                         }} className="text-red-500 p-3 hover:bg-red-500/10 rounded-xl transition-colors self-center">
                           <Trash2 className="w-5 h-5" />
                         </button>
