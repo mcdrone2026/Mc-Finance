@@ -508,6 +508,19 @@ export default function McFinanceApp() {
   const [enableMccleyDeduction, setEnableMccleyDeduction] = useState(false);
   const [selectedMccleyExpenseIds, setSelectedMccleyExpenseIds] = useState<string[]>([]);
   const [mccleyScope, setMccleyScope] = useState<'filtered' | 'all'>('filtered');
+  const [enableLoanImport, setEnableLoanImport] = useState(false);
+  const [selectedLoanIds, setSelectedLoanIds] = useState<string[]>([]);
+
+  // Person Open Loans Computation
+  const personOpenLoans = useMemo(() => {
+    if (reportFilters.person === 'Todos') return [];
+    return loans.filter(l => {
+      if (l.person !== reportFilters.person) return false;
+      const amountPaid = l.amountPaid ?? (l.installmentsPaid * l.monthlyValue);
+      const remaining = Math.max(0, l.totalValue - amountPaid);
+      return remaining > 0 && l.installmentsPaid < l.installmentsTotal;
+    });
+  }, [loans, reportFilters.person]);
 
   // Mccley Open Expenses Computation
   const mccleyOpenExpenses = useMemo(() => {
@@ -551,6 +564,18 @@ export default function McFinanceApp() {
     setSelectedMccleyExpenseIds(initialIds);
     setEnableMccleyDeduction(initialIds.length > 0);
     setMccleyScope('filtered');
+
+    // Initialize Open Loans for current selected person
+    const openLoans = loans.filter(l => {
+      if (l.person !== reportFilters.person) return false;
+      const amountPaid = l.amountPaid ?? (l.installmentsPaid * l.monthlyValue);
+      const remaining = Math.max(0, l.totalValue - amountPaid);
+      return remaining > 0 && l.installmentsPaid < l.installmentsTotal;
+    });
+    const openLoanIds = openLoans.map(l => l.id);
+    setSelectedLoanIds(openLoanIds);
+    setEnableLoanImport(openLoanIds.length > 0);
+
     setShowPdfModal(true);
   };
 
@@ -938,17 +963,34 @@ export default function McFinanceApp() {
       ];
     });
 
+    const isLoanActive = enableLoanImport && selectedLoanIds.length > 0;
+    const selectedLoans = personOpenLoans.filter(l => selectedLoanIds.includes(l.id));
+    const totalLoanAdditions = selectedLoans.reduce((acc, l) => acc + l.monthlyValue, 0);
+
     const isDeductionActive = enableMccleyDeduction && selectedMccleyExpenseIds.length > 0;
     const selectedMccleyExpenses = mccleyOpenExpenses.filter(e => selectedMccleyExpenseIds.includes(e.id));
     const totalDeductions = selectedMccleyExpenses.reduce((acc, e) => acc + getExpensePersonShare(e, 'Mccley'), 0);
 
     tableRows.push([
-      isDeductionActive ? 'TOTAL DA DESPESA' : 'TOTAL',
+      (isDeductionActive || isLoanActive) ? 'SUBTOTAL DA DESPESA' : 'TOTAL',
       '',
       totalRawValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
       '',
       totals.reportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     ]);
+
+    if (isLoanActive) {
+      selectedLoans.forEach(loan => {
+        const nextInstNumber = loan.installmentsPaid + 1;
+        tableRows.push([
+          `(+) Parcela Empréstimo: ${loan.description} (${nextInstNumber}/${loan.installmentsTotal})`,
+          formatDateBR(loan.date),
+          `(+) R$ ${loan.monthlyValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          'Empréstimo',
+          `(+) R$ ${loan.monthlyValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        ]);
+      });
+    }
 
     if (isDeductionActive) {
       selectedMccleyExpenses.forEach(mccExp => {
@@ -961,10 +1003,12 @@ export default function McFinanceApp() {
           `(-) R$ ${share.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
         ]);
       });
+    }
 
-      const finalTotal = totals.reportTotal - totalDeductions;
+    if (isLoanActive || isDeductionActive) {
+      const finalTotal = totals.reportTotal + totalLoanAdditions - totalDeductions;
       tableRows.push([
-        'VALOR TOTAL APÓS ABATIMENTO',
+        'VALOR TOTAL A RECEBER / AJUSTADO',
         '',
         '',
         '',
@@ -2863,8 +2907,95 @@ export default function McFinanceApp() {
                 </div>
               </div>
 
-              {/* Option to deduct Mccley's open expenses */}
+              {/* Option to import open loan installments for the person */}
               <div className="space-y-4">
+                <div className="flex items-center justify-between bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
+                  <div>
+                    <p className="font-bold text-sm">Incluir Parcelas em Aberto de Empréstimo</p>
+                    <p className="text-xs text-gray-400">Incorpora parcelas de empréstimos em aberto de {reportFilters.person} no valor a receber</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={enableLoanImport} 
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setEnableLoanImport(checked);
+                        if (checked) {
+                          setSelectedLoanIds(personOpenLoans.map(l => l.id));
+                        }
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-[#10B981]"></div>
+                  </label>
+                </div>
+
+                {enableLoanImport && (
+                  <div className="space-y-3 bg-[#262626]/30 p-4 rounded-2xl border border-white/5">
+                    <div className="flex justify-between items-center text-xs font-bold text-gray-300">
+                      <span>Empréstimos em Aberto de {reportFilters.person} ({personOpenLoans.length})</span>
+                      {personOpenLoans.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (selectedLoanIds.length === personOpenLoans.length) {
+                              setSelectedLoanIds([]);
+                            } else {
+                              setSelectedLoanIds(personOpenLoans.map(l => l.id));
+                            }
+                          }}
+                          className="text-xs text-[#10B981] hover:underline font-bold"
+                        >
+                          {selectedLoanIds.length === personOpenLoans.length ? 'Desmarcar Todos' : 'Selecionar Todos'}
+                        </button>
+                      )}
+                    </div>
+
+                    {personOpenLoans.length === 0 ? (
+                      <div className="text-center py-4 text-xs text-gray-500 italic">
+                        Nenhum empréstimo em aberto encontrado para {reportFilters.person}.
+                      </div>
+                    ) : (
+                      <div className="max-h-40 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                        {personOpenLoans.map(loan => {
+                          const isChecked = selectedLoanIds.includes(loan.id);
+                          const nextInst = loan.installmentsPaid + 1;
+                          return (
+                            <label 
+                              key={loan.id} 
+                              className={`flex items-center justify-between p-3 rounded-xl border transition-colors cursor-pointer text-xs ${isChecked ? 'bg-[#10B981]/10 border-[#10B981]/40' : 'bg-[#262626]/60 border-white/5 hover:border-white/10'}`}
+                            >
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <input 
+                                  type="checkbox"
+                                  checked={isChecked}
+                                  onChange={() => {
+                                    if (isChecked) {
+                                      setSelectedLoanIds(selectedLoanIds.filter(id => id !== loan.id));
+                                    } else {
+                                      setSelectedLoanIds([...selectedLoanIds, loan.id]);
+                                    }
+                                  }}
+                                  className="w-4 h-4 rounded border-gray-700 bg-transparent text-[#10B981] focus:ring-[#10B981] cursor-pointer"
+                                />
+                                <div className="min-w-0">
+                                  <p className="font-bold truncate text-white">{loan.description || 'Empréstimo'}</p>
+                                  <p className="text-[10px] text-gray-400">Parcela {nextInst}/{loan.installmentsTotal} • Data: {formatDateBR(loan.date)}</p>
+                                </div>
+                              </div>
+                              <span className="font-bold text-[#10B981] whitespace-nowrap ml-2">
+                                (+) R$ {loan.monthlyValue.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Option to deduct Mccley's open expenses */}
                 <div className="flex items-center justify-between bg-[#262626]/50 p-4 rounded-2xl border border-white/5">
                   <div>
                     <p className="font-bold text-sm">Abater Despesas em Aberto do Mccley</p>
@@ -2965,9 +3096,13 @@ export default function McFinanceApp() {
 
               {/* Financial Preview Box */}
               {(() => {
+                const selectedLoans = personOpenLoans.filter(l => selectedLoanIds.includes(l.id));
+                const totalLoanAdditions = enableLoanImport ? selectedLoans.reduce((acc, l) => acc + l.monthlyValue, 0) : 0;
+
                 const selectedMccleyExpenses = mccleyOpenExpenses.filter(e => selectedMccleyExpenseIds.includes(e.id));
-                const totalDeductions = selectedMccleyExpenses.reduce((acc, e) => acc + getExpensePersonShare(e, 'Mccley'), 0);
-                const finalTotal = enableMccleyDeduction ? totals.personReportTotal - totalDeductions : totals.personReportTotal;
+                const totalDeductions = enableMccleyDeduction ? selectedMccleyExpenses.reduce((acc, e) => acc + getExpensePersonShare(e, 'Mccley'), 0) : 0;
+
+                const finalTotal = totals.personReportTotal + totalLoanAdditions - totalDeductions;
 
                 return (
                   <div className="bg-[#262626] p-5 rounded-2xl border border-white/10 space-y-3">
@@ -2975,6 +3110,15 @@ export default function McFinanceApp() {
                       <span>Valor Total da Despesa ({reportFilters.person}):</span>
                       <span className="font-bold">R$ {totals.personReportTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
+
+                    {enableLoanImport && selectedLoans.length > 0 && (
+                      <div className="flex justify-between items-center text-xs text-[#10B981] font-medium">
+                        <span>(+) Parcelas de Empréstimo ({selectedLoans.length} item{selectedLoans.length > 1 ? 's' : ''}):</span>
+                        <span className="font-bold text-[#10B981]">
+                          + R$ {totalLoanAdditions.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    )}
                     
                     {enableMccleyDeduction && selectedMccleyExpenses.length > 0 && (
                       <div className="flex justify-between items-center text-xs text-red-400 font-medium">
@@ -2986,7 +3130,7 @@ export default function McFinanceApp() {
                     )}
 
                     <div className="pt-3 border-t border-white/10 flex justify-between items-center">
-                      <span className="text-sm font-bold text-white">Valor Total Após Abatimento:</span>
+                      <span className="text-sm font-bold text-white">Valor Total Após Ajuste:</span>
                       <span className="text-xl font-bold text-[#10B981]">
                         R$ {finalTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
